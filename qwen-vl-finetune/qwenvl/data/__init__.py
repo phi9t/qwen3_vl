@@ -6,6 +6,21 @@ CAMBRIAN_737K = {
     "data_path": "",
 }
 
+# VisualWebInstruct (HF: TIGER-Lab/VisualWebInstruct, config=conversation)
+# Expected local layout (materialized from HF):
+# - /data02/home/philip.yang/datasets/visualwebinstruct/train.jsonl
+# - /data02/home/philip.yang/datasets/visualwebinstruct/val.jsonl
+# - /data02/home/philip.yang/datasets/visualwebinstruct/images/...
+VISUALWEBINSTRUCT_TRAIN = {
+    "annotation_path": "/data02/home/philip.yang/datasets/visualwebinstruct/train.jsonl",
+    "data_path": "/data02/home/philip.yang/datasets/visualwebinstruct",
+}
+
+VISUALWEBINSTRUCT_VAL = {
+    "annotation_path": "/data02/home/philip.yang/datasets/visualwebinstruct/val.jsonl",
+    "data_path": "/data02/home/philip.yang/datasets/visualwebinstruct",
+}
+
 CAMBRIAN_737K_PACK = {
     "annotation_path": f"PATH_TO_CAMBRIAN_737K_ANNOTATION_PACKED",
     "data_path": f"",
@@ -26,12 +41,20 @@ VIDEOCHATGPT = {
     "data_path": "PATH_TO_VIDEOCHATGPT_DATA",
 }
 
+DEMO_SINGLE_IMAGES = {
+    "annotation_path": "demo/single_images.json",
+    "data_path": "qwen-vl-finetune",
+}
+
 data_dict = {
     "cambrian_737k": CAMBRIAN_737K,
     "cambrian_737k_pack": CAMBRIAN_737K_PACK,
+    "visualwebinstruct_train": VISUALWEBINSTRUCT_TRAIN,
+    "visualwebinstruct_val": VISUALWEBINSTRUCT_VAL,
     "mp_doc": MP_DOC,
     "clevr_mc": CLEVR_MC,
     "videochatgpt": VIDEOCHATGPT,
+    "demo_single_images": DEMO_SINGLE_IMAGES,
 }
 
 

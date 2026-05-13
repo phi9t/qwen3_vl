@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "autonomy"
+version = "0.0.0"
+description = "Repo-local Symphony scaffolding"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "temporalio>=1.7",
+    "orgparse>=0.4",
+    "gitpython>=3.1",
+    "transformers>=4.45",
+    "torch",
+]
+
+[project.scripts]
+autonomy = "autonomy.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["autonomy"]

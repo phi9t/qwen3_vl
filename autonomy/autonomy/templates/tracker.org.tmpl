@@ -1,0 +1,54 @@
+#+TITLE: {{ title }}
+#+AUTHOR: <whoever bootstrapped — informational only>
+#+STARTUP: overview logdone
+#+TODO: TODO(t) READY(r) IN-PROGRESS(i!) BLOCKED(b@/!) AWAITING-GATE(g!) | DONE(d!) WONTFIX(w@/!) FAILED(f@/!)
+#+PROPERTY: header-args :eval no
+#+FILETAGS: :autonomy:{{ slug }}:
+#+AUTONOMY_VERSION: 1
+#+AUTONOMY_RUN_SLUG: {{ slug }}            # MUST match the parent directory name
+#+AUTONOMY_DEFAULT_EXECUTOR: claude-code
+#+AUTONOMY_DEFAULT_GATE: tests+typecheck+gpt2-smoke
+
+* Tasks
+** TODO T03 Replace bilinear with nearest-neighbor in vision tower preproc
+   :PROPERTIES:
+   :ID:        T03                              ← REQUIRED. Stable, unique within the file. Workflow keys by this.
+   :EXECUTOR:  claude-code                      ← claude-code | torch-trial | shell
+   :GATE:      tests+typecheck+gpt2-smoke       ← +/- composition of: tests, typecheck, gpt2-smoke, none
+   :DEPENDS:   T01 T02                          ← space-separated :ID:s; empty/missing = no deps
+   :TIMEOUT:   2h                               ← Go-style duration; default 6h; bounds the activity start_to_close_timeout
+   :GPUS:      1                                ← passed through to draccus-run; default 1, "0" disables CUDA visibility
+   :BRANCH:    autonomy/{{ slug }}/T03              ← optional override; default computed
+   :WORKTREE:                                   ← workflow-owned, written when IN-PROGRESS
+   :OWNER:                                      ← workflow-owned: <workflow-id>:<attempt>
+   :STARTED:                                    ← workflow-owned: ISO-8601 UTC
+   :FINISHED:                                   ← workflow-owned: ISO-8601 UTC
+   :EXIT_CODE:                                  ← workflow-owned: executor's exit
+   :GATE_RESULT:                                ← workflow-owned: pass | fail:<which-check>
+   :ARTIFACTS:                                  ← workflow-owned: relative paths under artifacts/T03/
+   :PR:                                         ← reserved for future; not part of v1 done-gate
+   :END:
+
+   *Goal.* One-paragraph plain-English statement of what success looks like. This is what the executor reads.
+
+   *Constraints.* Bullets the executor must respect. E.g., "do not modify qwen-vl-finetune/research/."
+
+   *Acceptance.* Free-form additional gate criteria beyond :GATE: (encoded as cmd:... lines the
+   done-gate runs after the standard checks; one per line).
+
+*** Logbook
+    :LOGBOOK:
+    - State "IN-PROGRESS" from "TODO" [2026-05-13 Wed 14:02] :: claimed by autonomy-tracker-<slug>:1
+    - State "AWAITING-GATE" from "IN-PROGRESS" [2026-05-13 Wed 14:47] :: executor exit 0
+    - State "DONE" from "AWAITING-GATE" [2026-05-13 Wed 14:51] :: gate pass
+    :END:
+
+*** Blocker        ← only present when state is BLOCKED or FAILED; workflow appends
+    Reason: gate fail:gpt2-smoke — loss did not decrease.
+    Excerpt:
+    #+begin_src text
+    [trainer] step 0 loss=10.91
+    [trainer] step 29 loss=10.93
+    AssertionError: smoke loss non-decreasing (delta=+0.02)
+    #+end_src
+    See artifacts/T03/gpt2_smoke.log.

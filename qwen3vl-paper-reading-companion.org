@@ -1,0 +1,985 @@
+#+title: Qwen3-VL Paper Reading Companion (arXiv:2511.21631)
+#+subtitle: Repo-grounded notes and pointers — deep dive edition
+#+options: toc:3 num:t
+
+* Overview
+This companion is meant to be read side-by-side with:
+- The paper: [[https://arxiv.org/pdf/2511.21631][Qwen3-VL Technical Report (arXiv:2511.21631)]]
+- This repo: [[https://github.com/QwenLM/Qwen3-VL][QwenLM/Qwen3-VL]]
+
+The goal is to map paper claims to *where you can see the corresponding surface area in this repo*, plus provide practical guidance for anyone training, evaluating, or extending these models.
+
+Important: the *core model implementation* lives in Hugging Face =transformers=. This repo primarily provides:
+- usage examples and vision token budgeting controls
+- a finetuning stack (=qwen-vl-finetune/=) with multi-generation support (Qwen2/2.5/3-VL)
+- an alternative Unsloth-based training path (=qwen-vl-finetune/scripts/unsloth_qwen3vl_8b.py=)
+- utilities for vision resizing / video sampling with three video backends (=qwen-vl-utils/=)
+- evaluation harnesses with vLLM acceleration (=evaluation/*=)
+
+* 0) What this repo does (so you don't look for missing pieces)
+- Core model classes are imported from HF Transformers, not implemented here; e.g. the finetune entry imports:
+  - =Qwen3VLForConditionalGeneration= and =Qwen3VLMoeForConditionalGeneration= (see =qwen-vl-finetune/qwenvl/train/train_qwen.py:34=).
+  - Also supports =Qwen2VLForConditionalGeneration= and =Qwen2_5_VLForConditionalGeneration= (see =qwen-vl-finetune/qwenvl/train/train_qwen.py:32=).
+- This repo's "architecture" surface is mostly about:
+  - how multimodal inputs are *processed* (resizing, frame sampling, multiple video backends)
+  - how position IDs for multimodal sequences are *constructed* (three separate implementations for Qwen2/2.5/3-VL)
+  - how training is staged (freeze/unfreeze), launched (DeepSpeed/LoRA), and packed (flash attention with varlen)
+  - how evaluation uses vLLM for high-speed inference with instruct-vs-thinking mode separation
+
+** Multi-generation support
+A key feature of this repo is that a *single codebase* supports three model generations:
+| Generation | Model class (HF)                   | RoPE builder     | Config detection              |
+|------------+------------------------------------+-------------------+-------------------------------|
+| Qwen2-VL   | =Qwen2VLForConditionalGeneration=  | =get_rope_index_2=  | fallback (else clause)        |
+| Qwen2.5-VL | =Qwen2_5_VLForConditionalGeneration= | =get_rope_index_25= | "qwen2.5" in path             |
+| Qwen3-VL   | =Qwen3VLForConditionalGeneration=  | =get_rope_index_3=  | "qwen3" in path + AutoConfig  |
+| Qwen3-VL MoE | =Qwen3VLMoeForConditionalGeneration= | =get_rope_index_3= | "moe" in =config.model_type= |
+
+Dispatching logic is in =train_qwen.py:148–186=. For Qwen3, dense vs MoE is resolved via =AutoConfig= (not path string matching), which avoids misdetection from local snapshot directory names.
+
+* 1) Paper Abstract + Introduction → "three pillars" and what to verify
+The paper emphasizes:
+- long context (native 256K), extendable
+- strong text-only capability
+- strong multimodal reasoning (single/multi-image and video)
+- dense and MoE variants; "Instruct" vs "Thinking" editions
+
+Repo pointers:
+- Public README states "Native 256K context, expandable to 1M" (see =README.md:32=).
+- Many evaluation folders split "instruct" vs "thinking" runs into separate scripts (=infer_instruct.sh= / =infer_think.sh=), e.g. MathVision (see =evaluation/MathVision/README.md:22=).
+- Thinking-mode responses are parsed by splitting on =</think>= (see =evaluation/MathVision/run_mathv.py:252=).
+- Instruct scripts use greedy-like decoding; thinking scripts use higher temperature (=1.0=) with =top_p=0.95= (see =evaluation/MathVision/infer_think.sh:12=).
+
+* 2) Section 2 "Model Architecture" → map each module to repo touchpoints
+The paper's 3-module layout (vision encoder + merger + LLM) is reflected in how this repo configures I/O and training.
+
+** Vision encoder (SigLIP-2, dynamic resolution, 2D-RoPE)
+- The paper's SigLIP-2 specifics are inside HF Transformers, but the *operational* part (dynamic resolution / token budgeting) is here:
+  - =smart_resize()= enforces divisibility and pixel budgets (see =qwen-vl-utils/src/qwen_vl_utils/vision_process.py:56=).
+  - =SPATIAL_MERGE_SIZE= is a key constant affecting effective token counts (see =qwen-vl-utils/src/qwen_vl_utils/vision_process.py:25=).
+  - Token count bounds are defined as constants: =IMAGE_MIN_TOKEN_NUM = 4=, =IMAGE_MAX_TOKEN_NUM = 16384= (see =qwen-vl-utils/src/qwen_vl_utils/vision_process.py:26=).
+- README describes two ways to control image size (explicit resized dims vs min/max pixel budgets) and notes Qwen3VL rounding behavior (see =README.md:479=).
+- The freeze/unfreeze knob for the full vision tower is =--tune_mm_vision= (see =qwen-vl-finetune/qwenvl/train/argument.py:11=).
+- The model wrapper navigates different attribute layouts across generations — Qwen2/2.5 expose =model.visual= directly, while Qwen3 nests it at =model.model.visual= (see =qwen-vl-finetune/qwenvl/train/train_qwen.py:91=).
+
+** Merger (2x2 compression + DeepStack support)
+- Finetune code groups parameters and supports separate LR choices for merger vs vision tower:
+  - =mm_projector_lr= → applied to params with "merger" in name (see =qwen-vl-finetune/qwenvl/train/trainer.py:325=).
+  - =vision_tower_lr= → applied to params with "visual" in name (see =qwen-vl-finetune/qwenvl/train/trainer.py:329=).
+- The finetune entry exposes module-freezing knobs:
+  - =--tune_mm_vision= / =--tune_mm_mlp= / =--tune_mm_llm= (see =qwen-vl-finetune/qwenvl/train/argument.py:9–11=).
+  - These are enforced in =set_model()= which supports both Qwen2/2.5 layout (=model.visual=) and Qwen3 layout (=model.model.visual=) (see =qwen-vl-finetune/qwenvl/train/train_qwen.py:87=).
+- Diagnostic functions =print_trainable_parameters_visual()= and =print_trainable_parameters()= are monkey-patched onto all model variants via =trainer.py:497–511=.
+
+** LLM decoder (Qwen3 backbone; dense + MoE)
+- Finetuning imports both dense and MoE model classes from HF:
+  - Dense: =Qwen3VLForConditionalGeneration= (see =qwen-vl-finetune/qwenvl/train/train_qwen.py:34=)
+  - MoE: =Qwen3VLMoeForConditionalGeneration= (see =qwen-vl-finetune/qwenvl/train/train_qwen.py:35=)
+- Dense/MoE is auto-detected via =AutoConfig.model_type= (see =qwen-vl-finetune/qwenvl/train/train_qwen.py:151=).
+- MoE models require ZeRO-2 (not ZeRO-3). The MoE scripts explicitly use =zero2.json= (see =qwen-vl-finetune/scripts/sft_30a3b.sh:11=).
+
+** DeepStack (cross-layer injection)
+- The repo documents DeepStack at a high level (see =README.md:52=).
+- The actual DeepStack wiring is in HF Transformers' Qwen3-VL modeling code; this repo mainly configures inputs, training, and evaluation.
+
+* 3) Positional Encoding: From First Principles to MRoPE
+
+This section builds from scratch. No prior knowledge of positional encoding is assumed.
+
+** 3.1) Why position matters at all
+
+A transformer's self-attention computes:
+
+\[ \text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{QK^\top}{\sqrt{d}}\right) V \]
+
+The attention weights come from the dot products \( q_i^\top k_j \) between query and key vectors. These dot products measure similarity between tokens, but they have a critical blind spot: *they are permutation-invariant*. If you shuffle the input tokens, every \( q_i^\top k_j \) pair still produces the same value (just at a different matrix position). The sentences "the cat sat on the mat" and "mat the on sat cat the" would receive identical attention patterns.
+
+This means without some explicit position signal, a transformer treats its input as an unordered *set*, not an ordered *sequence*. We need a mechanism to inject "where am I in the sequence" into the computation.
+
+** 3.2) Absolute sinusoidal position embeddings (Vaswani et al., 2017)
+
+The original Transformer solution: *add* a fixed position vector \( \text{PE}(\text{pos}) \) to each token's embedding before feeding it into attention.
+
+The sinusoidal encoding defines the \( i \)-th element of the position vector for position \( \text{pos} \) as:
+
+\[ \text{PE}(\text{pos}, 2i) = \sin\!\left(\frac{\text{pos}}{10000^{2i/d}}\right) \]
+
+\[ \text{PE}(\text{pos}, 2i{+}1) = \cos\!\left(\frac{\text{pos}}{10000^{2i/d}}\right) \]
+
+where \( d \) is the embedding dimension and \( i \in \{0, 1, \ldots, d/2 - 1\} \).
+
+*** Why sinusoids?
+
+Three key properties:
+
+1. *Uniqueness*: each position gets a distinct vector (sinusoids at different frequencies create unique "fingerprints").
+
+2. *Boundedness*: all values lie in \( [-1, 1] \), so position info doesn't dominate the token embedding.
+
+3. *Linear relative-position encoding*: \( \text{PE}(\text{pos} + k) \) can be expressed as a *linear transformation* of \( \text{PE}(\text{pos}) \). For each pair of dimensions \( (2i, 2i{+}1) \), let \( \theta_i = 1/10000^{2i/d} \). Then:
+
+\[ \begin{pmatrix} \sin((\text{pos}+k)\theta_i) \\ \cos((\text{pos}+k)\theta_i) \end{pmatrix} = \begin{pmatrix} \cos(k\theta_i) & \sin(k\theta_i) \\ -\sin(k\theta_i) & \cos(k\theta_i) \end{pmatrix} \begin{pmatrix} \sin(\text{pos}\cdot\theta_i) \\ \cos(\text{pos}\cdot\theta_i) \end{pmatrix} \]
+
+This is a 2D rotation matrix! Shifting by \( k \) positions equals rotating each frequency component by angle \( k \theta_i \). The model can theoretically learn to detect relative distances because the transformation from position \( \text{pos} \) to \( \text{pos}+k \) is always the same rotation (independent of \( \text{pos} \)).
+
+*** Limitations
+
+- *Length ceiling*: the model has only seen positions up to the training length, so it may generalize poorly beyond that.
+- *Dilution through layers*: the position signal is added once at the input and may weaken as it propagates through many layers.
+- *Absolute, not relative*: the model must implicitly learn to extract relative distances from absolute position vectors.
+
+** 3.3) Learned absolute embeddings (GPT-2, BERT, ViT)
+
+A simpler approach: replace the fixed sinusoid table with a *learnable* embedding matrix.
+
+#+begin_src python
+self.position_embedding = nn.Embedding(max_positions, d_model)
+# Usage: x = token_embedding + self.position_embedding(positions)
+#+end_src
+
+*** Advantages
+- The model can learn task-specific position patterns.
+- No hand-designed frequency schedule.
+
+*** Disadvantages
+- *Hard length limit*: =max_positions= is fixed at training time. Cannot extrapolate to longer sequences at all.
+- *No inductive bias*: the model must learn from scratch that position 5 is "close to" position 6 and "far from" position 500.
+
+*** In Qwen3-VL's vision encoder
+The SigLIP-2 vision encoder uses *interpolated absolute positional embeddings* combined with 2D-RoPE (paper Section 2 preamble). When the input image is larger than the ViT's training resolution, the learned position embeddings are bilinearly interpolated to the new grid size.
+
+** 3.4) Relative position encodings (brief survey)
+
+The key insight motivating relative encodings: for attention to work well, what matters is not "I am at position 7" but "you are 3 positions to my left."
+
+Several approaches encode relative distance directly into attention:
+
+| Method            | Mechanism                                                  | Year |
+|-------------------+------------------------------------------------------------+------|
+| Transformer-XL    | Learned relative bias added to attention logits            | 2019 |
+| T5 relative bias  | Learned bucketized bias \( b(m - n) \) added to \( q^\top k \)  | 2020 |
+| ALiBi             | Fixed linear penalty: \( q^\top k - \lambda \cdot |m - n| \)   | 2022 |
+| RoPE              | Rotation of Q/K vectors; dot product depends on \( m - n \)    | 2022 |
+
+RoPE is the most elegant of these because it achieves relative encoding *without modifying the attention equation* -- position is baked into Q and K before the dot product.
+
+** 3.5) Rotary Position Embeddings (RoPE) — full derivation
+
+RoPE (Su et al., 2022) is the positional encoding used in LLaMA, Qwen, Mistral, and most modern LLMs. It is the foundation that MRoPE extends for multimodal models.
+
+*** 3.5.1) The design goal
+
+We want a function \( f(\mathbf{x}, m) \) that transforms a vector \( \mathbf{x} \) using position \( m \), such that the dot product between transformed vectors depends only on the *content* and the *relative position*:
+
+\[ \langle f(\mathbf{q}, m),\; f(\mathbf{k}, n) \rangle = g(\mathbf{q}, \mathbf{k}, m - n) \]
+
+for some function \( g \). The absolute positions \( m \) and \( n \) must not matter individually — only their difference \( m - n \).
+
+*** 3.5.2) The 2D case (one pair of dimensions)
+
+Start with the simplest case: \( d = 2 \). Represent a 2D vector \( \mathbf{q} = (q_0, q_1) \) as the complex number \( q_0 + i \cdot q_1 \).
+
+Define the RoPE transformation as multiplication by a unit complex number:
+
+\[ f(\mathbf{q}, m) = (q_0 + i\,q_1)\, e^{i\,m\,\theta} \]
+
+This rotates the vector by angle \( m\theta \) in the 2D plane. Now check the dot product (real part of conjugate product):
+
+\[ \text{Re}\!\left[ f(\mathbf{q}, m) \cdot \overline{f(\mathbf{k}, n)} \right] = \text{Re}\!\left[ (q_0 + i\,q_1)\, e^{i\,m\,\theta} \cdot \overline{(k_0 + i\,k_1)\, e^{i\,n\,\theta}} \right] \]
+
+\[ = \text{Re}\!\left[ (q_0 + i\,q_1)(\bar{k}_0 - i\,\bar{k}_1) \cdot e^{i\,(m-n)\,\theta} \right] \]
+
+The result depends on \( \mathbf{q} \), \( \mathbf{k} \), and \( m - n \) only. The absolute positions \( m \) and \( n \) have vanished into the relative distance.
+
+In matrix form, the rotation is:
+
+\[ R(\theta, m) = \begin{pmatrix} \cos(m\theta) & -\sin(m\theta) \\ \sin(m\theta) & \cos(m\theta) \end{pmatrix} \]
+
+So \( f(\mathbf{q}, m) = R(\theta, m) \cdot \mathbf{q} \).
+
+*** 3.5.3) Generalizing to \( d \) dimensions
+
+For a \( d \)-dimensional vector (where \( d \) is even), we create \( d/2 \) independent 2D rotation planes. Each plane \( i \) pairs two dimensions and gets its own angular frequency:
+
+\[ \theta_i = \frac{1}{10000^{2i/d}}, \qquad i \in \{0, 1, \ldots, d/2 - 1\} \]
+
+Low-\( i \) planes rotate fast (high frequency, capturing short-range position); high-\( i \) planes rotate slowly (low frequency, capturing long-range position). This is the same multi-scale frequency idea as sinusoidal embeddings.
+
+*Which dimensions pair together?* There are two common conventions:
+
+- *Interleaved*: pair \( (0,1), (2,3), \ldots, (d{-}2, d{-}1) \) — adjacent dimensions form a rotation plane.
+- *Split-half*: pair \( (0, d/2), (1, d/2{+}1), \ldots, (d/2{-}1, d{-}1) \) — the first half pairs with the second half.
+
+HF Transformers (and thus Qwen3-VL) uses the *split-half* convention. The pairing is dimension \( i \) with dimension \( i + d/2 \), and both use frequency \( \theta_i \). The mathematical properties are identical regardless of convention.
+
+Abstractly, the full rotation for position \( m \) applies a 2D rotation to each pair independently. The RoPE-transformed query is:
+
+\[ q'_i = q_i \cos(m\theta_i) - q_{i+d/2} \sin(m\theta_i), \qquad q'_{i+d/2} = q_{i+d/2} \cos(m\theta_i) + q_i \sin(m\theta_i) \]
+
+for each \( i \in \{0, \ldots, d/2 - 1\} \). This can be written as a block-permuted rotation matrix \( R_d(m) \) acting on \( \mathbf{q} \).
+
+*** The relative-position property (proof)
+
+Since each 2D rotation is orthogonal (\( R^\top = R^{-1} \)):
+
+\[ {\mathbf{q}'}^\top \mathbf{k}' = \mathbf{q}^\top R_d(m)^\top R_d(n)\, \mathbf{k} = \mathbf{q}^\top R_d(n - m)\, \mathbf{k} \]
+
+because for each pair, \( R(\theta_i, m)^\top R(\theta_i, n) = R(\theta_i, -m) R(\theta_i, n) = R(\theta_i, n{-}m) \). The dot product depends only on the relative distance \( n - m \).
+
+*** 3.5.4) The efficient implementation (no matrix multiply needed)
+
+Explicitly constructing and multiplying a \( d \times d \) matrix per token would be wasteful. The rotation can be computed with two element-wise operations using a helper function.
+
+In HF Transformers (and this repo's =trainer.py:180=), the split-half convention is used:
+
+#+begin_src python
+def rotate_half(x):
+    """Split in half and swap with negation."""
+    x1 = x[..., : x.shape[-1] // 2]   # first half:  [q_0, ..., q_{d/2-1}]
+    x2 = x[..., x.shape[-1] // 2 :]   # second half: [q_{d/2}, ..., q_{d-1}]
+    return torch.cat((-x2, x1), dim=-1)
+    # result: [-q_{d/2}, ..., -q_{d-1}, q_0, ..., q_{d/2-1}]
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+#+end_src
+
+The =cos= and =sin= tensors have shape =(batch, seq_len, d)= and are constructed by doubling the =d/2= frequency values: =emb = cat((freqs, freqs), dim=-1)=. This means =cos[i] == cos[i + d/2]= for each \( i < d/2 \).
+
+Expanding for one pair \( (i, i{+}d/2) \):
+
+\[ q'_i = q_i \cdot \cos(m\theta_i) + (-q_{i+d/2}) \cdot \sin(m\theta_i) = q_i \cos(m\theta_i) - q_{i+d/2} \sin(m\theta_i) \]
+
+\[ q'_{i+d/2} = q_{i+d/2} \cdot \cos(m\theta_i) + q_i \cdot \sin(m\theta_i) \]
+
+which is exactly the 2D rotation of the pair \( (q_i, q_{i+d/2}) \) by angle \( m\theta_i \).
+
+*** 3.5.5) Worked example (\( d = 4 \))
+
+Let \( d = 4 \), so we have 2 rotation planes with frequencies:
+
+\[ \theta_0 = \frac{1}{10000^{0/4}} = 1.0, \qquad \theta_1 = \frac{1}{10000^{2/4}} = \frac{1}{100} = 0.01 \]
+
+With the split-half convention, the pairs are: *(dim 0 ↔ dim 2)* with \( \theta_0 = 1.0 \), and *(dim 1 ↔ dim 3)* with \( \theta_1 = 0.01 \). Pair 0 rotates fast (high frequency); pair 1 rotates slowly (low frequency).
+
+**** Transform \( \mathbf{q} = [1, 0, 0, 1] \) at position \( m = 3 \):
+
+Pair (dim 0, dim 2) with \( \theta_0 = 1.0 \): angle = \( 3 \times 1.0 = 3.0 \) rad
+
+\[ q'_0 = q_0 \cos(3) - q_2 \sin(3) = 1 \cdot (-0.990) - 0 \cdot 0.141 = -0.990 \]
+\[ q'_2 = q_2 \cos(3) + q_0 \sin(3) = 0 \cdot (-0.990) + 1 \cdot 0.141 = 0.141 \]
+
+Pair (dim 1, dim 3) with \( \theta_1 = 0.01 \): angle = \( 3 \times 0.01 = 0.03 \) rad
+
+\[ q'_1 = q_1 \cos(0.03) - q_3 \sin(0.03) = 0 \cdot 0.9996 - 1 \cdot 0.0300 = -0.030 \]
+\[ q'_3 = q_3 \cos(0.03) + q_1 \sin(0.03) = 1 \cdot 0.9996 + 0 \cdot 0.0300 = 0.9996 \]
+
+Result: \( \mathbf{q}' = [-0.990, \; -0.030, \; 0.141, \; 0.9996] \).
+
+**** Verify via =rotate_half= (the code path)
+
+#+begin_example
+q           = [ 1,     0,     0,     1    ]
+cos         = [cos(3), cos(0.03), cos(3), cos(0.03)]    ← doubled: cos[i] = cos[i+2]
+            = [-0.990, 0.9996, -0.990, 0.9996]
+sin         = [sin(3), sin(0.03), sin(3), sin(0.03)]
+            = [ 0.141, 0.0300,  0.141, 0.0300]
+rotate_half = [-0,    -1,      1,     0    ]             ← [-q2,-q3, q0,q1]
+
+q * cos     = [-0.990, 0,     0,     0.9996]
+rot(q)*sin  = [ 0,    -0.030, 0.141, 0     ]
+q'          = [-0.990, -0.030, 0.141, 0.9996]            ✓ matches matrix calculation
+#+end_example
+
+Notice: pair 0 (high frequency) has rotated significantly in just 3 positions. Pair 1 (low frequency) has barely rotated at all. This multi-scale behavior is what lets RoPE encode both fine-grained local positions and coarse long-range ones.
+
+**** Verify the relative-position property
+
+Take \( \mathbf{k} = [0, 1, 1, 0] \) at position \( n = 1 \):
+
+Pair (0, 2): \( k'_0 = 0 \cdot \cos(1) - 1 \cdot \sin(1) = -0.841 \), \( k'_2 = 1 \cdot \cos(1) + 0 \cdot \sin(1) = 0.540 \)
+
+Pair (1, 3): \( k'_1 = 1 \cdot \cos(0.01) - 0 \cdot \sin(0.01) = 0.99995 \), \( k'_3 = 0 \cdot \cos(0.01) + 1 \cdot \sin(0.01) = 0.0100 \)
+
+Direct dot product:
+
+\[ \mathbf{q}' \cdot \mathbf{k}' = (-0.990)(-0.841) + (-0.030)(0.99995) + (0.141)(0.540) + (0.9996)(0.0100) \approx 0.889 \]
+
+Now compute via relative position \( n - m = -2 \): \( \mathbf{q}^\top R_4(-2)\, \mathbf{k} \).
+
+Pair (0, 2) at relative angle \( -2 \): \( \cos(-2) = -0.416 \), \( \sin(-2) = -0.909 \)
+
+\[ [R(-2)\,\mathbf{k}]_0 = 0 \cdot (-0.416) - 1 \cdot (-0.909) = 0.909, \quad [R(-2)\,\mathbf{k}]_2 = 1 \cdot (-0.416) + 0 \cdot (-0.909) = -0.416 \]
+
+Pair (1, 3) at relative angle \( -0.02 \): \( \cos(-0.02) = 0.9998 \), \( \sin(-0.02) = -0.0200 \)
+
+\[ [R(-2)\,\mathbf{k}]_1 = 1 \cdot 0.9998 - 0 \cdot (-0.0200) = 0.9998, \quad [R(-2)\,\mathbf{k}]_3 = 0 \cdot 0.9998 + 1 \cdot (-0.0200) = -0.0200 \]
+
+\[ \mathbf{q}^\top R_4(-2)\, \mathbf{k} = 1 \cdot 0.909 + 0 \cdot 0.9998 + 0 \cdot (-0.416) + 1 \cdot (-0.0200) = 0.889 \]
+
+The values match. The dot product is indeed a function of relative position only.
+
+*** 3.5.6) Properties of RoPE (summary)
+
+1. *Relative position encoding*: proven above. No separate bias term needed.
+2. *Long-range decay*: high-frequency planes oscillate rapidly, causing dot products between distant tokens to average toward zero. This provides an implicit soft attention decay — nearby tokens tend to have larger dot products.
+3. *No learnable parameters*: the frequencies \( \theta_i \) are fixed at initialization, not learned. Position encoding is "free" in terms of parameter count.
+4. *Applied at every layer*: unlike additive position embeddings (added once at input), RoPE is applied to Q and K at *every attention layer*, refreshing the position signal throughout the network.
+5. *Natural length extension*: RoPE can process sequences longer than training length by evaluating the rotation at larger position values. However, unseen rotation angles may degrade performance in practice (see Section 3.8 on YaRN).
+
+** 3.6) Multi-dimensional RoPE (M-RoPE) for vision-language models
+
+Standard RoPE encodes 1D sequential position. But images are 2D grids and videos are 3D (time + height + width). Flattening spatial structure into a 1D sequence and applying standard RoPE discards crucial locality information: two spatially adjacent image patches (e.g., (row 2, col 3) and (row 2, col 4)) might end up with very different 1D positions, while a patch at (row 2, col 3) and one at (row 5, col 3) might have similar 1D positions despite being spatially distant.
+
+*** 3.6.1) The M-RoPE idea
+
+M-RoPE (Multi-dimensional RoPE) solves this by giving each spatial axis its own set of position indices, applied to a *partition* of the embedding dimensions.
+
+For a model with head dimension \( d \), split the dimensions into groups:
+
+#+begin_example
+Dimensions:  [0 .. d_t-1 | d_t .. d_t+d_h-1 | d_t+d_h .. d-1]
+             \________/   \_____________/    \_____________/
+              temporal        height             width
+#+end_example
+
+Each group applies standard RoPE independently with its own position index:
+
+- Dimensions \( [0, d_t) \): rotated by temporal position \( p_t \)
+- Dimensions \( [d_t, d_t+d_h) \): rotated by height position \( p_h \)
+- Dimensions \( [d_t+d_h, d) \): rotated by width position \( p_w \)
+
+The per-token position is now a *triple* \( (p_t, p_h, p_w) \) instead of a single integer. The rotation matrix becomes:
+
+\[ R_d^{\text{MRoPE}}(p_t, p_h, p_w) = \text{diag}\!\big(\underbrace{R(\theta_0, p_t), \ldots}_{\text{temporal dims}},\; \underbrace{R(\theta_j, p_h), \ldots}_{\text{height dims}},\; \underbrace{R(\theta_k, p_w), \ldots}_{\text{width dims}}\big) \]
+
+This is =apply_multimodal_rotary_pos_emb= in =trainer.py:135=, where =self.rope_scaling["mrope_section"]= defines the partition sizes \( (d_t, d_h, d_w) \).
+
+*** 3.6.2) Position ID construction — the =position_ids= tensor
+
+In this repo, M-RoPE positions are represented as a tensor of shape =(3, batch_size, seq_len)= — one "channel" per spatial axis. The three functions in =rope2d.py= construct this tensor.
+
+*For text tokens*: all three axes get the same sequential index \( [0, 1, 2, \ldots] \). When temporal, height, and width positions are identical, M-RoPE degenerates to standard 1D RoPE (every dimension sees the same rotation angle as standard RoPE would assign).
+
+*For vision tokens*: each axis gets its own grid index. Consider a video frame with 2 height patches and 3 width patches after the 2x2 spatial merge:
+
+#+begin_example
+              w=0    w=1    w=2
+  h=0        (0,0)  (0,1)  (0,2)
+  h=1        (1,0)  (1,1)  (1,2)
+#+end_example
+
+These 6 patches are flattened in row-major order. Their 3-axis position IDs are:
+
+#+begin_example
+Patch index:       0     1     2     3     4     5
+Temporal IDs:     [0     0     0     0     0     0]     (same frame → same t)
+Height IDs:       [0     0     0     1     1     1]     (row index)
+Width IDs:        [0     1     2     0     1     2]     (column index)
+#+end_example
+
+With this scheme, two patches in the same row have identical height position — their attention dot product through the height dimensions contributes a "same row" signal. Two patches in the same column share width position. The temporal dimension distinguishes different frames in a video.
+
+*** 3.6.3) Worked example from the repo: Qwen2.5-VL video positions
+
+From the docstring of =get_rope_index_25= (=rope2d.py:134=):
+
+#+begin_example
+Video: 3 temporal patches, 2 height patches, 2 width patches
+Timing: tokens_per_second=25, temporal_patch_size=2, fps=1
+        interval = 25 * 2 / 1 = 50
+
+input_ids:    [V   V   V   V   V   V   V   V   V    V    V    V    T    T    T    T    T]
+temporal IDs: [0   0   0   0   50  50  50  50  100  100  100  100  101  102  103  104  105]
+height IDs:   [0   0   1   1   0   0   1   1   0    0    1    1   101  102  103  104  105]
+width IDs:    [0   1   0   1   0   1   0   1   0    1    0    1   101  102  103  104  105]
+#+end_example
+
+Notice: temporal gaps of 50 between frames encode real-world time spacing. Height and width reset to grid coordinates within each frame. Text tokens (T) resume sequential numbering from \( \text{max}(\text{vision positions}) + 1 = 101 \).
+
+*** 3.6.4) Sectioned vs interleaved M-RoPE
+
+The partition of dimensions across axes can be done in two ways:
+
+*Sectioned* (Qwen2-VL and Qwen2.5-VL): each axis gets a *contiguous block* of dimensions.
+
+#+begin_example
+dim:    0  1  2  3  4  5  6  7  8  9  10  11
+axis:   t  t  t  t  h  h  h  h  w   w   w   w
+#+end_example
+
+Problem: each frequency band is used by only one axis. Low-frequency dimensions (high index \( i \)) carry only width information; high-frequency dimensions (low \( i \)) carry only temporal information. This creates a *frequency imbalance* — some axes never benefit from certain frequency scales.
+
+*Interleaved* (Qwen3-VL innovation — paper Section 2.1): axes are *interleaved* across dimensions.
+
+#+begin_example
+dim:    0  1  2  3  4  5  6  7  8  9  10  11
+axis:   t  h  w  t  h  w  t  h  w   t   h   w
+#+end_example
+
+Now every frequency band carries information from all three axes. The low-frequency dimensions (which capture long-range dependencies) encode temporal, height, *and* width information. This prevents the frequency imbalance that hurts long-video understanding.
+
+In the code: Qwen2/2.5-VL uses =apply_multimodal_rotary_pos_emb= (=trainer.py:135=), which takes an explicit =mrope_section= argument and selects contiguous chunks of cos/sin from each axis. Qwen3-VL uses the standard =apply_rotary_pos_emb= (=trainer.py:180=) because interleaving is handled upstream in =Qwen3VLTextRotaryEmbedding.apply_interleaved_mrope()=. That function takes the three-channel frequency tensor of shape =(3, bs, seq_len, d/2)= and writes H-axis frequencies into positions =1, 4, 7, …= and W-axis frequencies into positions =2, 5, 8, …=, with T-axis frequencies remaining at =0, 3, 6, …= plus any leftover tail positions. The default =mrope_section = [24, 20, 20]= (sum = 64 = head_dim/2) gives T 24 frequency slots, H 20, and W 20. The resulting cos/sin tensor is then a single =(bs, seq_len, d)= tensor that standard =apply_rotary_pos_emb= can consume directly.
+
+** 3.7) Three generations in this repo — the position ID construction
+
+The file =qwen-vl-finetune/qwenvl/data/rope2d.py= contains three functions that construct the =(3, batch, seq_len)= position ID tensor. Comparing them reveals how the approach evolved:
+
+*** =get_rope_index_2= (Qwen2-VL, line 336) — absolute frame index, sectioned MRoPE
+- Temporal position = frame index directly: =t_index = torch.arange(llm_grid_t)=
+- No real-time scaling; temporal position 0, 1, 2 regardless of actual frame spacing
+- Vision position example: =temporal: [0,0,0,0, 1,1,1,1, 2,2,2,2]=
+
+*** =get_rope_index_25= (Qwen2.5-VL, line 125) — real-time scaled, sectioned MRoPE
+- Time-aware temporal indexing: =time_tensor = expanded_range * second_per_grid_t * 2=
+- Uses =second_per_grid_ts= from video processor to scale temporal positions by real-world time
+- The multiplication by 2 converts seconds to a position-ID scale
+- Extensive docstring with worked example (=tokens_per_second=25=, =interval=50=)
+
+*** =get_rope_index_3= (Qwen3-VL, line 5) — timestamp tokens, interleaved MRoPE
+
+This is the paper's approach. The key differences:
+
+1. *Frame splitting* (lines 17–18): =video_grid_thw= is expanded via =repeat_interleave= so each frame becomes its own row with \( T=1 \). A 3-frame video with =grid_thw = [[3, 4, 6]]= becomes three rows: =[[1,4,6], [1,4,6], [1,4,6]]=.
+
+2. *Temporal index is always 0* (line 86–87): since each frame is treated independently, =t_index = torch.arange(1) = [0]= always. The comment says: "t_index is always 0 because llm_grid_t is always 1 (we use timestamps to encode the temporal information for videos)."
+
+3. *Timestamp tokens carry time information*: the input sequence looks like =<t1> <vision_start> <frame1> <vision_end> <t2> <vision_start> <frame2> <vision_end>=. Textual timestamp tokens between frames get sequential position IDs, and the model learns temporal relationships through these text positions rather than through the RoPE temporal axis.
+
+Algorithm walkthrough for =get_rope_index_3=:
+
+#+begin_example
+Step 1: Scan input_ids for vision_start_token_id (151652) to find vision segments.
+Step 2: For each vision segment, look at the next token to determine image (151655) vs video (151656).
+Step 3: For images: build (t, h, w) grid from image_grid_thw. t is from the original grid.
+        For videos: t=1 always (already split in step 0).
+Step 4: Compute LLM-space grid: llm_grid_h = h // spatial_merge_size, llm_grid_w = w // spatial_merge_size.
+Step 5: Build position_ids for the vision segment:
+        t_index = arange(llm_grid_t) expanded over h*w  (always [0,0,...,0] for video)
+        h_index = arange(llm_grid_h) expanded over t*w
+        w_index = arange(llm_grid_w) expanded over t*h
+        Stack as (3, num_vision_tokens) and offset by cumulative position.
+Step 6: Text segments get all three axes incremented sequentially from max(prior_positions) + 1.
+Step 7: Return position_ids of shape (3, batch, seq_len) and mrope_position_deltas.
+#+end_example
+
+*** Key difference summary
+
+| Feature              | Qwen2-VL             | Qwen2.5-VL                   | Qwen3-VL                       |
+|----------------------+----------------------+-------------------------------+---------------------------------|
+| Temporal encoding    | Frame index          | Real-time (scaled by seconds) | Timestamps (textual tokens)     |
+| =video_grid_thw.T=  | Multi-frame          | Multi-frame                   | Always 1 (per-frame split)      |
+| Time info source     | Position IDs         | Position IDs + fps scaling    | Timestamp tokens in text stream |
+| Dimension layout     | Sectioned            | Sectioned                     | Interleaved                     |
+| RoPE application     | =apply_multimodal_rotary_pos_emb= | =apply_multimodal_rotary_pos_emb= | =apply_rotary_pos_emb= |
+
+** 3.8) Length extrapolation: YaRN and context extension
+
+Standard RoPE degrades beyond the training context length because the model encounters rotation angles it has never seen. If training used positions \( [0, L) \), then at inference position \( L + k \), the rotation angles \( (L+k)\theta_i \) for low-frequency planes may fall outside the trained range.
+
+*** YaRN (Yet another RoPE extensioN)
+
+YaRN addresses this by *interpolating* the frequencies rather than extrapolating:
+
+- The base frequency \( 10000 \) is scaled up, effectively stretching the rotation schedule so that position \( L_{\text{new}} \) maps to the same angle that position \( L_{\text{train}} \) originally occupied.
+- A "NTK-aware" scheme applies different scaling factors to different frequency bands: high-frequency (short-range) dimensions are left mostly unchanged, while low-frequency (long-range) dimensions are scaled more aggressively.
+
+*** In this repo
+
+The root README discusses YaRN configuration for extending Qwen3-VL from 256K to ~1M tokens. The model config contains a =rope_scaling= dictionary with type, factor, and attention-factor fields. vLLM supports this via =--rope-scaling= CLI flags.
+
+Paper Section 5.12.3 (needle-in-a-haystack ablation) tests long-context retention and verifies that the YaRN-extended model maintains retrieval accuracy at extreme sequence lengths.
+
+* 4) Section 2.2 "DeepStack" → how to sanity-check in practice
+Paper claim: inject intermediate ViT features into early LLM layers to tighten alignment and improve fine-grained perception.
+
+In this repo, practical knobs that affect the same end goals:
+- Increase image token budget and verify improvements on fine-grained perception tasks.
+  - Pixel/token control is described in README (see =README.md:477=).
+  - Implementation lives in =qwen_vl_utils= (see =qwen-vl-utils/src/qwen_vl_utils/vision_process.py:56=).
+- Constants that control the token budget:
+  - =IMAGE_MIN_TOKEN_NUM = 4= / =IMAGE_MAX_TOKEN_NUM = 16384= (image, per-image)
+  - =VIDEO_MIN_TOKEN_NUM = 128= / =VIDEO_MAX_TOKEN_NUM = 768= (video, per-frame)
+  - =MODEL_SEQ_LEN= from env var (default 128000) — total model context budget
+
+* 5) Section 2.3 "Video Timestamp" → repo knobs that implement the idea
+Paper claim: explicit textual timestamp tokens replace absolute-time alignment.
+
+Repo pointers:
+- Timestamp-based handling is called out in =rope2d.py= (see =qwen-vl-finetune/qwenvl/data/rope2d.py:14=).
+- The input format uses timestamp tokens like =<t1> <vision_start> <frame1> <vision_end> <t2> ...= (see =rope2d.py:15= comment).
+- Video frame sampling logic is implemented in =smart_nframes()= (see =qwen-vl-utils/src/qwen_vl_utils/vision_process.py:144=).
+- Frame sampling defaults: =FPS = 2.0=, =FRAME_FACTOR = 2=, =FPS_MIN_FRAMES = 4=, =FPS_MAX_FRAMES = 768= (see =vision_process.py:31–34=).
+
+** Video backend architecture
+The repo supports *three* video reading backends with automatic fallback:
+| Backend      | Module          | Priority  | Notes                                    |
+|--------------+-----------------+-----------+------------------------------------------|
+| torchcodec   | =_read_video_torchcodec= | 1st (if available) | Multi-threaded decoding (=TORCHCODEC_NUM_THREADS=) |
+| decord       | =_read_video_decord=     | 2nd (if available) | Standard, widely used                    |
+| torchvision  | =_read_video_torchvision=| fallback  | Always available; slower for long videos |
+
+Controlled by =FORCE_QWENVL_VIDEO_READER= env var (see =vision_process.py:386=). Backend detection is in =get_video_reader_backend()= (line 389).
+
+All backends share the same pipeline:
+1. Read raw video → get =total_frames= and =video_fps=
+2. Calculate frame range (=calculate_video_frame_range=, line 234) — supports =video_start= / =video_end= clipping
+3. Determine =nframes= via =smart_nframes= (line 144) — respects fps/nframes/min_frames/max_frames
+4. Linspace-sample frame indices and extract
+5. =smart_resize= each frame within pixel budget
+
+* 6) Section 3 "Pre-Training" → translate stages into finetune controls
+The paper's four-stage pretraining recipe:
+- S0: Merger-only alignment
+- S1: Full multimodal pretraining (8K)
+- S2: Long-context pretraining (32K)
+- S3: Ultra-long adaptation (256K)
+
+This repo does not ship the pretraining pipeline, but you can mirror the *staging idea* in finetuning:
+- Merger-only analog:
+  - set =--tune_mm_mlp True --tune_mm_llm False --tune_mm_vision False= (flags in =qwen-vl-finetune/qwenvl/train/argument.py:9–11=, applied in =qwen-vl-finetune/qwenvl/train/train_qwen.py:87=).
+- Context-length analog:
+  - set =--model_max_length= (see =qwen-vl-finetune/qwenvl/train/argument.py:38=).
+  - launcher scripts commonly use 8192; e.g. =qwen-vl-finetune/scripts/sft_qwen3_8b.sh:99=.
+- Full-finetune analog (vision + merger + LLM):
+  - set all three =--tune_mm_*= flags to True.
+
+** Concrete script matrix
+| Script           | Model                  | DeepSpeed | LoRA | Batch | LR   | Notes                  |
+|------------------+------------------------+-----------+------+-------+------+------------------------|
+| =sft.sh=         | Qwen2.5-VL-3B          | ZeRO-3    | No   | 4     | 2e-7 | Baseline reference     |
+| =sft_7b.sh=      | Qwen2.5-VL-7B          | ZeRO-3    | No   | 2     | 1e-5 | Upstream default       |
+| =sft_32b.sh=     | Qwen2.5-VL-32B         | ZeRO-3    | No   | 2     | 2e-7 | Large dense            |
+| =sft_qwen3_4b.sh= | Qwen3-VL-4B           | optional  | opt  | 4     | 1e-5 | New: auto HF resolve   |
+| =sft_qwen3_8b.sh= | Qwen3-VL-8B           | optional  | opt  | 2     | 1e-5 | New: auto HF resolve   |
+| =sft_30a3b.sh=   | Qwen3-VL-30B-A3B (MoE) | ZeRO-2   | No   | 1     | 1e-5 | MoE requires ZeRO-2   |
+| =sft_30a3b_lora.sh= | Qwen3-VL-30B-A3B (MoE) | ZeRO-2 | Yes  | 1     | 1e-5 | MoE + LoRA             |
+
+** DeepSpeed configurations
+Three configs are included:
+- =zero3.json= — ZeRO Stage 3, no offload (dense models)
+- =zero3_offload.json= — ZeRO Stage 3 + CPU offload for optimizer and params (for memory-constrained setups, see =qwen-vl-finetune/scripts/zero3_offload.json:35–39=)
+- =zero2.json= — ZeRO Stage 2 (required for MoE)
+
+* 7) Section 3.2 "Pre-Training Data" → map data categories to the repo's data contract
+The paper enumerates many data categories (caption/interleaved, knowledge, OCR/docs, grounding, spatial/3D, code, video, STEM, agent).
+
+** Data format contract
+In this repo, the concrete data contract for finetuning is documented as:
+- JSON/JSONL with:
+  - =image= or =video= fields (paths — string or list of strings)
+  - =conversations= turns with =from= ("human"/"gpt") and =value= (text)
+  - prompts containing =<image>= or =<video>= tags
+  - strict tag-to-file alignment rules (mismatch raises =ValueError=)
+See =qwen-vl-finetune/README.md:46= and =qwen-vl-finetune/README.md:212=.
+
+** Dataset registry
+Datasets are registered in =qwen-vl-finetune/qwenvl/data/__init__.py= as a dictionary:
+| Key                     | Annotation type | Notes                                   |
+|-------------------------+-----------------+-----------------------------------------|
+| =cambrian_737k=         | JSON            | Placeholder paths                       |
+| =cambrian_737k_pack=    | JSON (packed)   | Placeholder paths                       |
+| =visualwebinstruct_train= | JSONL         | Concrete paths for VWI dataset          |
+| =visualwebinstruct_val= | JSONL           | Validation split                        |
+| =mp_doc=                | JSON            | Placeholder paths                       |
+| =clevr_mc=              | JSON            | Placeholder paths                       |
+| =videochatgpt=          | JSON            | Placeholder paths                       |
+| =demo_single_images=    | JSON            | Working demo dataset                    |
+
+Sampling rate suffix =%X= is supported (e.g. =cambrian_737k%50= uses 50% of data) — see =parse_sampling_rate()= at line 61.
+
+** VisualWebInstruct — the concrete training dataset
+The repo's custom scripts (=sft_qwen3_4b.sh=, =sft_qwen3_8b.sh=) default to VisualWebInstruct:
+- Source: HF =TIGER-Lab/VisualWebInstruct= (config=conversation)
+- Expected layout: =train.jsonl=, =val.jsonl=, =images/= under a common root
+- Both train and eval splits are wired up (=--do_train --do_eval=)
+
+* 8) Section 4 "Post-Training" (SFT → Distill → RL) → what exists here
+The paper describes a 3-stage post-training pipeline (SFT, strong-to-weak distillation, RL).
+
+This repo primarily supports SFT-style finetuning through two independent paths:
+
+** Path A: Standard SFT (DeepSpeed + HF Trainer)
+- LoRA knobs are present in training args (see =qwen-vl-finetune/qwenvl/train/argument.py:48–52=):
+  - =--lora_enable=, =--lora_r= (default 64), =--lora_alpha= (default 128), =--lora_dropout= (default 0.0)
+  - LoRA targets =["q_proj", "k_proj", "v_proj", "o_proj"]= (see =train_qwen.py:233=)
+- DeepSpeed ZeRO configs are included:
+  - ZeRO-3 for dense models (see =qwen-vl-finetune/scripts/zero3.json=)
+  - ZeRO-3 with CPU offload (see =qwen-vl-finetune/scripts/zero3_offload.json=)
+  - ZeRO-2 for MoE (MoE scripts explicitly say "only supports zero2") (see =qwen-vl-finetune/scripts/sft_30a3b.sh:9=)
+
+** Path B: Unsloth SFT (4-bit quantized, single GPU friendly)
+An alternative training path uses Unsloth for memory-efficient finetuning:
+- Script: =qwen-vl-finetune/scripts/unsloth_qwen3vl_8b.py=
+- Model: =unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit= (4-bit quantized)
+- Uses =FastVisionModel= with =SFTTrainer= from TRL
+- Key differences from Path A:
+  - 4-bit quantized (=load_in_4bit=True=)
+  - Unsloth-specific gradient checkpointing
+  - =adamw_8bit= optimizer
+  - Data adapter: =vwi_to_unsloth.py= converts VWI JSONL to Unsloth's =messages= format, loading images as PIL objects in memory
+- Supports =--finetune-vision-layers= toggle, epoch-based or step-based training
+
+** Data adapter for Unsloth
+=vwi_to_unsloth.py= (see =qwen-vl-finetune/scripts/vwi_to_unsloth.py=) converts VisualWebInstruct JSONL rows into Unsloth-compatible ={"messages": [...]}= dicts:
+- Replaces =<image>= placeholders with PIL.Image objects
+- Drops rows where image/placeholder counts mismatch (logged to stderr)
+- Supports =--limit= for quick testing
+
+The full distillation/RL pipelines from the paper are not implemented end-to-end in this repo.
+
+* 9) Data Processing Pipeline (deep dive)
+The data processing pipeline is in =qwen-vl-finetune/qwenvl/data/data_processor.py= and is one of the most important files to understand for finetuning.
+
+** =LazySupervisedDataset= (line 245)
+The core dataset class:
+- Lazy-loads: reads annotation files eagerly, but processes each sample on =__getitem__=
+- Supports both JSON and JSONL annotation formats (detected by file extension)
+- Implements retry logic (3 retries on current sample, then 3 retries on next sample) for cloud-disk resilience
+- Dispatches to the correct RoPE function based on =data_args.model_type= ("qwen3vl" / "qwen2.5vl" / "qwen2vl")
+- When =data_packing= is enabled, delegates to =_get_packed_item= which concatenates multiple samples into one sequence
+
+** =preprocess_qwen_visual= (line 203)
+The tokenization and label-masking function:
+- Uses =processor.apply_chat_template()= to tokenize
+- Constructs labels by scanning for token 77091 (=assistant= header marker) and only supervising tokens between there and the next =<|endoftext|>= (token 151645)
+- All non-assistant tokens are masked with =IGNORE_INDEX = -100=
+
+** Data collators
+Two collators serve different training modes:
+- =DataCollatorForSupervisedDataset= (line 539): standard padding-based collation
+- =FlattenedDataCollatorForSupervisedDataset= (line 609): for packed/flattened training — concatenates sequences and produces cumulative seqlen tensors for varlen attention
+
+** Processor pixel overrides (line 45)
+=update_processor_pixels()= patches the processor's image and video processors at runtime:
+- Overrides =min_pixels= / =max_pixels= for both image and video
+- Sets =min_frames= / =max_frames= / =fps= for video
+- Logs all before/after values at rank 0
+
+** Message construction (line 141)
+=_build_messages()= converts the annotation format to HF chat format:
+- Splits text by =<image>= / =<video>= placeholders
+- Pops from image/video pools in order (FIFO)
+- Raises =ValueError= if any media is unused or pools are exhausted
+
+* 10) Flash Attention & Sequence Packing (deep dive)
+=qwen-vl-finetune/qwenvl/train/trainer.py= contains critical monkey-patches for efficient training.
+
+** Custom Flash Attention (line 33)
+=flash_attention_forward()= replaces the default attention implementation:
+- Uses =flash_attn_varlen_func= from the =flash_attn= package
+- Accepts cumulative sequence lengths as =attention_mask= (not a boolean mask)
+- Computes =max_seqlen= from the seqlen boundaries
+- Handles PEFT float32 upcasting (queries/keys may be silently cast to fp32 by LayerNorm)
+
+** Attention class replacements (line 215)
+=replace_qwen2_vl_attention_class()= monkey-patches attention across *all four model variants*:
+- =Qwen2VLAttention.forward= → =qwen2vl_forward= (uses =apply_multimodal_rotary_pos_emb=)
+- =Qwen2_5_VLAttention.forward= → same function (shared RoPE application)
+- =Qwen3VLTextAttention.forward= → =qwen3vl_forward= (uses =apply_rotary_pos_emb=, adds QK-norm)
+- =Qwen3VLMoeTextAttention.forward= → same Qwen3 function
+- Also replaces =create_causal_mask= and =create_sliding_window_causal_mask= with =return_mask= (identity) — the custom FA varlen implementation handles masking internally
+
+This is activated only when =data_flatten= or =data_packing= is enabled (see =train_qwen.py:198=).
+
+** Qwen3-VL attention differences (line 163)
+The =qwen3vl_forward= function differs from =qwen2vl_forward= in two key ways:
+1. QK-Normalization: =self.q_norm(self.q_proj(...))= and =self.k_norm(self.k_proj(...))= (Qwen3 adds LayerNorm on Q/K)
+2. =apply_rotary_pos_emb= (non-multimodal variant) instead of =apply_multimodal_rotary_pos_emb=
+
+** Custom optimizer (line 316)
+=create_optimizer()= is monkey-patched onto HF =Trainer= to support up to 6 parameter groups:
+| Group                      | LR source              | Weight decay |
+|----------------------------+------------------------+--------------|
+| LLM + decay params         | base LR                | yes          |
+| LLM + no-decay params      | base LR                | no           |
+| Merger + decay params       | =mm_projector_lr=      | yes          |
+| Merger + no-decay params    | =mm_projector_lr=      | no           |
+| Vision tower + decay params | =vision_tower_lr=      | yes          |
+| Vision tower + no-decay     | =vision_tower_lr=      | no           |
+
+* 11) Section 5 "Evaluation" → repo coverage
+The paper's benchmark suite maps well to =evaluation/*=.
+
+** Evaluation harnesses
+| Benchmark   | Script                    | Key features                                  |
+|-------------+---------------------------+-----------------------------------------------|
+| MathVision  | =run_mathv.py=            | vLLM, judge model eval, CoT support           |
+| MMMU        | =run_mmmu.py=             | vLLM, standard academic benchmark             |
+| RealWorldQA | =run_realworldqa.py=      | vLLM, real-world visual QA                    |
+| VideoMME    | =run_videomme.py=         | vLLM, video understanding                     |
+| ODinW-13    | =run_odinw.py=            | vLLM, object detection in the wild            |
+
+Each harness has:
+- =dataset_utils.py= — data loading, image extraction
+- =eval_utils.py= — scoring, judge model integration
+- =common_utils.py= — shared utilities (present in MathVision, MMMU, RealWorldQA)
+- =infer_instruct.sh= / =infer_think.sh= — launcher scripts with mode-specific hyperparameters
+
+** Instruct vs Thinking mode
+The evaluation scripts parametrize the decoding strategy:
+| Parameter            | Instruct mode        | Thinking mode          |
+|----------------------+----------------------+------------------------|
+| =temperature=        | 0.7                  | 1.0                    |
+| =top_p=              | 0.8                  | 0.95                   |
+| =max_new_tokens=     | 32768                | 40960                  |
+| =presence_penalty=   | 1.5                  | 0.0                    |
+| Response parsing     | Direct               | Split on =</think>=   |
+
+** vLLM integration pattern
+All eval harnesses follow a consistent pattern (see =evaluation/MathVision/run_mathv.py=):
+1. Load =AutoProcessor= for input preparation
+2. Build messages in HF chat format with pixel budget overrides
+3. Apply chat template → get prompt text
+4. Call =process_vision_info()= from =qwen_vl_utils= to extract PIL images / video tensors
+5. Initialize =LLM()= with tensor parallelism and memory utilization controls
+6. Batch all inputs → single =llm.generate()= call with =SamplingParams=
+7. Post-process: parse =</think>= for thinking models, extract final answer
+8. Optional judge-based evaluation (e.g., GPT-4o for MathVision)
+
+* 12) Research Events & Experiment Tracking
+=train_qwen.py= includes a lightweight structured-event system for experiment tracking:
+- =research_event()= (line 53) writes JSON records to =RESEARCH_EVENTS_PATH= (env var)
+- Events: =trainer_started=, =model_loaded=, =data_module_ready=, =trainer_footer=
+- Footer includes =val_loss= (reused from training-time eval to avoid distributed deadlock) and =peak_vram_mb=
+- =RESEARCH_TRIAL_ID= env var tags events to a specific trial
+
+The footer is careful to avoid calling =trainer.evaluate()= on rank 0 only — this would deadlock in distributed training. Instead it reads from =trainer.state.log_history= (see =train_qwen.py:292=).
+
+* 13) Practical Recipes & Runbooks
+
+** Recipe 1: Minimal finetuning (merger-only, Qwen3-VL-4B)
+#+begin_src sh
+cd qwen-vl-finetune
+MODEL_NAME_OR_PATH=Qwen/Qwen3-VL-4B-Instruct \
+  TUNE_MM_VISION=False TUNE_MM_MLP=True TUNE_MM_LLM=False \
+  DATASETS=demo_single_images MAX_STEPS=50 \
+  bash scripts/sft_qwen3_4b.sh
+#+end_src
+
+** Recipe 2: Full finetune with eval (Qwen3-VL-8B)
+#+begin_src sh
+cd qwen-vl-finetune
+MODEL_NAME_OR_PATH=Qwen/Qwen3-VL-8B-Instruct \
+  DEEPSPEED_CONFIG=scripts/zero3.json \
+  DATASETS=visualwebinstruct_train EVAL_DATASETS=visualwebinstruct_val \
+  EVAL_STEPS=500 MAX_STEPS=5000 \
+  bash scripts/sft_qwen3_8b.sh
+#+end_src
+
+** Recipe 3: MoE LoRA (memory-constrained)
+#+begin_src sh
+cd qwen-vl-finetune
+bash scripts/sft_30a3b_lora.sh
+# Uses ZeRO-2, LoRA enabled, batch_size=1
+#+end_src
+
+** Recipe 4: Unsloth 4-bit (single GPU)
+#+begin_src sh
+cd qwen-vl-finetune/scripts
+python unsloth_qwen3vl_8b.py \
+  --train-jsonl /path/to/train.jsonl \
+  --data-root /path/to/data \
+  --max-steps 100 --learning-rate 2e-4
+#+end_src
+
+** Recipe 5: Run MathVision evaluation
+#+begin_src sh
+cd evaluation/MathVision
+python run_mathv.py infer \
+  --model-path /path/to/model \
+  --data-dir /path/to/mathvision_data \
+  --output-file results/predictions.jsonl
+
+python run_mathv.py eval \
+  --input-file results/predictions.jsonl \
+  --output-file results/eval.csv
+#+end_src
+
+* 14) Common Pitfalls & Debugging
+
+** HF Hub rate limits
+The custom scripts (=sft_qwen3_4b.sh=, =sft_qwen3_8b.sh=) include a =resolve_model_path()= function that:
+- Tries local-only download first
+- Retries up to =HF_SNAPSHOT_MAX_TRIES= times with exponential backoff
+- Parses "Retry after N seconds" from 429 responses
+- Once resolved, forces offline mode (=HF_HUB_OFFLINE=1=, =TRANSFORMERS_OFFLINE=1=) to prevent further API calls during training
+See =qwen-vl-finetune/scripts/sft_qwen3_8b.sh:36=.
+
+** Distributed deadlocks
+- Never call =trainer.evaluate()= on rank 0 only — it involves collective operations. The codebase works around this by reading =eval_loss= from =trainer.state.log_history= (see =train_qwen.py:292=).
+- NCCL debug env vars are pre-set in the custom scripts: =TORCH_NCCL_ASYNC_ERROR_HANDLING=, =TORCH_NCCL_BLOCKING_WAIT=, =TORCH_NCCL_DUMP_ON_TIMEOUT= (see =sft_qwen3_8b.sh:156=).
+
+** Image/video placeholder mismatches
+=_build_messages()= in =data_processor.py= raises =ValueError= if:
+- More =<image>= tags than image paths → "exceeds the number of provided images"
+- Unused image paths → "N image(s) remain unused"
+Same for video. This is strict by design — check your annotation files.
+
+** MoE + ZeRO-3 incompatibility
+MoE models *must* use ZeRO-2. Using ZeRO-3 with MoE will fail. The MoE scripts (=sft_30a3b.sh=, =sft_30a3b_lora.sh=) hardcode =zero2.json=.
+
+** =data_flatten= / =data_packing= activation
+These flags trigger the attention monkey-patching in =trainer.py=. Without flash_attn installed, training with these flags will crash. Import path: =from flash_attn.flash_attn_interface import flash_attn_varlen_func=.
+
+** Vision tower layout differences
+Qwen2/2.5-VL exposes =model.visual= directly; Qwen3-VL nests it at =model.model.visual=. The =set_model()= function handles both (see =train_qwen.py:91–96=). If you're writing custom code that accesses vision parameters, use the same pattern.
+
+* 15) Suggested reading passes (efficient workflow)
+** Pass 1: Architecture + Positional Encoding (~45 min)
+- Paper: Abstract + Section 2
+- Companion: §3 (positional encoding deep-dive) — start from §3.1 (why position matters) and read through §3.5 (RoPE derivation) before looking at code
+- Repo companion tabs:
+  - =README.md:43= (architecture summary)
+  - =qwen-vl-finetune/qwenvl/data/rope2d.py= — read all three =get_rope_index_*= functions, focus on the diff between Qwen2.5 and Qwen3 (companion §3.7)
+  - =qwen-vl-utils/src/qwen_vl_utils/vision_process.py:56= (=smart_resize= pixel/token budget)
+  - =qwen-vl-utils/src/qwen_vl_utils/vision_process.py:24= (token count constants)
+
+** Pass 2: Data pipeline (~60–90 min)
+- Paper: Section 3.1 recipe + skim 3.2 data taxonomy
+- Repo companion tabs:
+  - =qwen-vl-finetune/README.md:42= (the actual JSON data contract)
+  - =qwen-vl-finetune/qwenvl/data/__init__.py= (dataset registry)
+  - =qwen-vl-finetune/qwenvl/data/data_processor.py:141= (=_build_messages= — how annotations become chat format)
+  - =qwen-vl-finetune/qwenvl/data/data_processor.py:203= (=preprocess_qwen_visual= — tokenization and label masking)
+  - =qwen-vl-finetune/qwenvl/data/data_processor.py:245= (=LazySupervisedDataset= — the dataset class)
+
+** Pass 3: Training mechanics (~60 min)
+- Paper: Section 4 post-training
+- Repo companion tabs:
+  - =qwen-vl-finetune/qwenvl/train/argument.py= — all three argument dataclasses
+  - =qwen-vl-finetune/qwenvl/train/train_qwen.py:87= (=set_model= — freeze/unfreeze logic)
+  - =qwen-vl-finetune/qwenvl/train/train_qwen.py:148= (model dispatch — dense vs MoE)
+  - =qwen-vl-finetune/qwenvl/train/trainer.py:33= (flash attention implementation)
+  - =qwen-vl-finetune/qwenvl/train/trainer.py:316= (custom optimizer with per-module LR)
+  - =qwen-vl-finetune/scripts/sft_qwen3_8b.sh= (production-grade launcher)
+
+** Pass 4: Evaluation (~30–60 min)
+- Paper: Section 5 + Appendix prompts
+- Repo companion tabs:
+  - =evaluation/MathVision/run_mathv.py= — vLLM inference + judge-based eval pattern
+  - =evaluation/MathVision/infer_think.sh= vs =infer_instruct.sh= — decoding parameter differences
+  - =evaluation/*/README.md= for the specific benchmarks you care about
+
+** Pass 5: Hands-on (~variable)
+- Try Recipe 1 above (merger-only) with the demo dataset to verify the pipeline works
+- Read =sft_qwen3_8b.sh= end-to-end — it's the most complete launcher with HF resolve, offline mode, NCCL configs
+- If interested in Unsloth path, read =vwi_to_unsloth.py= then =unsloth_qwen3vl_8b.py=
+
+* 16) Cookbooks → paper section mapping
+The =cookbooks/= directory contains Jupyter notebooks that demonstrate paper capabilities hands-on:
+| Notebook                      | Maps to paper section(s)         | Notes                                        |
+|-------------------------------+----------------------------------+----------------------------------------------|
+| =2d_grounding.ipynb=          | §3.2.4 (grounding), §5.5        | =[0,1000]= coordinate grid                   |
+| =3d_grounding.ipynb=          | §3.2.5 (spatial/3D), §5.5       | Omni3D / depth understanding                 |
+| =ocr.ipynb=                   | §3.2.3, §5.4                    | Text recognition + multilingual OCR          |
+| =document_parsing.ipynb=      | §3.2.3, §5.4                    | Layout + structured extraction               |
+| =long_document_understanding.ipynb= | §3.2.3, §5.4             | Long-context document QA                     |
+| =german_document_ocr.ipynb=   | §3.2.3, §5.4                    | Multilingual OCR (not in root README table)  |
+| =video_understanding.ipynb=   | §2.3, §3.2.7, §5.9              | Timestamp-based video reasoning              |
+| =spatial_understanding.ipynb= | §3.2.5, §5.8                    | Embodied + spatial tasks                     |
+| =mobile_agent.ipynb=          | §3.2.9 (agent), §5.10           | GUI agent trajectories                       |
+| =computer_use.ipynb=          | §3.2.9, §5.10                   | Desktop agent tasks                          |
+| =think_with_images.ipynb=     | §4.5 (Thinking with Images)     | Tool-augmented visual reasoning              |
+| =mmcode.ipynb=                | §3.2.6, §5.11                   | Multimodal coding tasks                      |
+| =omni_recognition.ipynb=      | §5.1                            | General visual recognition                   |
+
+The cookbooks also contain =utils/agent_function_call.py= and =utils/multimodal_coding/*= for agentic/coding demos.
+
+* 17) Full paper section map (for completeness)
+The companion covers the paper's major sections, but the paper has finer subsections. Full map for reference:
+| Paper § | Title                                    | Companion § |
+|---------+------------------------------------------+-------------|
+| 1       | Introduction                             | §1          |
+| 2       | Model Architecture (+ LLM/ViT/merger)   | §2          |
+| 2.1     | Interleaved MRoPE                        | §3 (full PE deep-dive, esp. §3.6–3.7) |
+| 2.2     | DeepStack                                | §4          |
+| 2.3     | Video Timestamp                          | §5          |
+| 3       | Pre-Training                             | §6          |
+| 3.1     | Training recipe (S0–S3)                  | §6          |
+| 3.2     | Pre-training data                        | §7          |
+| 3.2.1   | Image caption & interleaved text-image   | §7 (data)   |
+| 3.2.2   | Knowledge (entity-heavy)                 | §7 (data)   |
+| 3.2.3   | OCR, documents, long-document            | §7 (data)   |
+| 3.2.4   | Grounding and counting                   | §7 (data)   |
+| 3.2.5   | Spatial understanding & 3D               | §7 (data)   |
+| 3.2.6   | Code (text-only + multimodal)            | §7 (data)   |
+| 3.2.7   | Video                                    | §7 (data)   |
+| 3.2.8   | STEM                                     | §7 (data)   |
+| 3.2.9   | Agent (GUI + function calling + search)  | §7 (data)   |
+| 4       | Post-Training                            | §8          |
+| 4.1     | Training recipe                          | §8          |
+| 4.2     | Cold start data (SFT + Long-CoT)        | §8          |
+| 4.3     | Strong-to-weak distillation              | §8          |
+| 4.4     | Reinforcement learning (Reasoning + General) | §8      |
+| 4.5     | Thinking with Images (tool-integrated RL)| §8, §16     |
+| 4.6     | Infrastructure (Megatron, vLLM, SGLang)  | §12, §18    |
+| 5.1–5.4 | General VQA, reasoning, alignment, OCR   | §11         |
+| 5.5     | 2D & 3D grounding                        | §11         |
+| 5.6     | Fine-grained perception (tool-augmented) | §11         |
+| 5.7–5.8 | Multi-image, embodied                    | §11         |
+| 5.9     | Video understanding                      | §11         |
+| 5.10    | Agent                                    | §11         |
+| 5.11    | Text-centric tasks                       | §11         |
+| 5.12    | Ablations (ViT, DeepStack, NiH/YaRN)    | §3.8, §4 (partial)|
+
+Key paper claims *not* deeply covered in this repo (worth noting when reading):
+- *Square-root per-token loss normalization* (§1) — balances text vs VL token counts in loss; training-side only
+- *Cold-start data engineering* (§4.2) — difficulty filtering, multimodal-necessity scoring
+- *SAPO RL* (§4.4.1) — specific RL algorithm for reasoning tasks
+- *Infrastructure* (§4.6) — Megatron hybrid parallelism (TP/PP/CP/EP/ZeRO-1 DP)
+- *SigLIP-2 continued pre-training* (§2 preamble) — 2D-RoPE + interpolated absolute PE on ViT
+- *Ablation tables* (§5.12) — ViT CPT (Table 11), DeepStack (Table 12), NiH/YaRN (Fig. 3)
+
+* 18) Deployment, Web Demo & Docker
+The repo includes deployment-ready artifacts:
+
+** Web demo
+- =web_demo_mm.py= — Gradio-based multimodal demo
+- =requirements_web_demo.txt= — minimal deps for the demo
+- Not covered by the finetuning or evaluation docs; standalone for quick model interaction
+
+** Docker
+- =docker/Dockerfile-qwen3vl-cu128= — CUDA 12.8 container image
+- =docker/docker_web_demo.sh= — launcher script for the containerized web demo
+- Official image: =qwenllm/qwenvl:qwen3vl-cu128= (referenced in root README)
+
+** Deployment framework support (root README)
+- vLLM ≥ 0.11.0 — multimodal offline/online with =process_vision_info=
+- SGLang — alternative serving engine
+- Both support tensor parallelism for large/MoE models
+
+* 19) Research Infrastructure & Experiment Tracking
+Beyond the standard finetuning pipeline, the repo contains local research infrastructure:
+
+** =qwen-vl-finetune/research/= directory
+- =README.md= — documents the temporal trial lifecycle
+- =run_profiled.sh= — launches profiled training probes
+- =profiles/*.env= — hardware-specific configs (B200/H100/A100)
+- =observability/= — trial lifecycle management, snapshots, analyzer, artifact store
+
+** =qwen-vl-finetune/experiments/= directory
+- =summary.md= — consolidated experiment results
+- =design_in_repo.md= — design doc for the in-repo finetune pipeline
+- =design_unsloth.md= — design doc for the Unsloth training path
+- =tracker_in_repo.org= / =tracker_unsloth.org= — org-mode experiment trackers
+- =run_all.sh= — batch runner for experiment sweeps
+
+** =qwen-vl-finetune/tools/= directory
+- =check_image.py= — validates image files in dataset annotations
+- =pack_data.py= — packs multiple samples into single sequences for =data_packing= mode
+- =process_bbox.ipynb= — notebook for bounding box format conversion
+
+* 20) External evaluation frameworks
+The root README mentions two external frameworks for full benchmark reproduction (beyond the in-repo harnesses):
+- [[https://github.com/open-compass/VLMEvalKit][VLMEvalKit]] — for "official" leaderboard-style evaluation
+- [[https://github.com/EvolvingLMMs-Lab/lmms-eval][lmms-eval]] — alternative framework
+These complement the five in-repo vLLM-based harnesses for specific benchmarks.
+
+* Notes
+- This file is intentionally "repo-first": it highlights what you can inspect and run here.
+- For model-internal details (exact DeepStack wiring, SigLIP-2 internals, etc.), the authoritative code path is HF Transformers' Qwen3-VL modeling modules.
+- The companion tracks the repo as of the latest working state. If upstream changes land, re-verify line numbers.
+- Paper subsections §3.2.1–3.2.9, §4.5 (Thinking with Images), §4.6 (Infrastructure), and §5.12 (Ablations) are detailed in the paper but have limited repo surface — they are included in the full section map (§17) for reading context.

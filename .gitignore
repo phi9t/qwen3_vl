@@ -1,0 +1,19 @@
+.autonomy/worktrees/
+.autonomy/runs/*/artifacts/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# draccus built artifacts (rebuilt by scripts/bootstrap-rootfs.sh and draccus-build,
+# or symlinked to a sibling bundle for repo-local development — match both forms)
+draccus/rootfs
+draccus/state
+draccus/cache
+draccus/build
+draccus/envs/*/spack.lock
+draccus/projects/*
+!draccus/projects/_template/

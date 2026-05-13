@@ -4,6 +4,18 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
 
+# Activate the spack env that holds torch/transformers/peft/hf_hub (only if not
+# already inside a python env). The prior 4B sweep ran under this env; without
+# it `python` resolves to /usr/local/bin/python which lacks huggingface_hub.
+if [[ -z "${SPACK_ENV:-}" && -z "${VIRTUAL_ENV:-}" ]]; then
+  if [[ -f /data02/home/philip.yang/spack/share/spack/setup-env.sh ]]; then
+    set +u
+    . /data02/home/philip.yang/spack/share/spack/setup-env.sh
+    spack env activate "${SPACK_TRAIN_ENV:-torch-jax-ffmpeg}" || true
+    set -u
+  fi
+fi
+
 # Distributed training configuration
 MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 MASTER_PORT=${MASTER_PORT:-$(shuf -i 20001-29999 -n 1)}
@@ -17,7 +29,7 @@ if [[ -n "${deepspeed}" && "${deepspeed}" != /* ]]; then
 fi
 
 # Model configuration
-llm=${MODEL_NAME_OR_PATH:-"Qwen/Qwen3-VL-4B-Instruct"}
+llm=${MODEL_NAME_OR_PATH:-"Qwen/Qwen3-VL-8B-Instruct"}
 
 # Resolve HF model IDs to a local snapshot path to avoid repeated Hub API calls
 # (notably, tokenizers may call `model_info()` on non-local ids, which can hit 429 rate limits).
@@ -72,7 +84,7 @@ PY
 
 # Training hyperparameters
 lr=${LR:-1e-5}
-batch_size=${BATCH_SIZE:-4}
+batch_size=${BATCH_SIZE:-2}
 grad_accum_steps=${GRAD_ACCUM_STEPS:-4}
 max_steps=${MAX_STEPS:-5000}
 eval_steps=${EVAL_STEPS:-500}
@@ -104,14 +116,14 @@ datasets=${DATASETS:-"visualwebinstruct_train"}
 eval_datasets=${EVAL_DATASETS:-"visualwebinstruct_val"}
 
 # Output configuration
-run_name=${RUN_NAME:-"qwen3vl"}
-output_dir=${OUTPUT_DIR:-"${ROOT_DIR}/output"}
+run_name=${RUN_NAME:-"qwen3vl_8b"}
+output_dir=${OUTPUT_DIR:-"${ROOT_DIR}/output_8b"}
 
 # CUDA toolkit runtime libraries (required for nvrtc on this machine)
 CUDA_HOME=${CUDA_HOME:-"/data02/home/philip.yang/spack/opt/spack/linux-icelake/cuda-12.9.1-wctiaiinsx6ez7f6ynrhmbgqspgp3kzd"}
 export CUDA_HOME
 export PATH="$CUDA_HOME/bin:$PATH"
-export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 
 export HF_HOME=${HF_HOME:-"/data02/home/philip.yang/hf_home"}
 export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-"$HF_HOME"}

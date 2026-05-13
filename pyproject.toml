@@ -1,0 +1,54 @@
+[tool.ruff]
+line-length = 88
+# Target Python 3.10+ (uses X | None union syntax, built-in generics, StrEnum)
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "D",    # pydocstyle (Google-style docstrings)
+    "ANN",  # flake8-annotations (type annotation coverage)
+    "B",    # flake8-bugbear (common bugs)
+    "UP",   # pyupgrade (modern Python idioms)
+    "SIM",  # flake8-simplify
+    "RUF",  # Ruff-specific rules
+]
+ignore = [
+    # Docstring rules relaxed for non-public / test code
+    "D100",  # Missing docstring in public module (enforced manually for new modules)
+    "D104",  # Missing docstring in public package
+    "D105",  # Missing docstring in magic method
+    "D107",  # Missing docstring in __init__
+    # Type annotation relaxations
+    "ANN101",  # Missing type annotation for self
+    "ANN102",  # Missing type annotation for cls
+    "ANN401",  # Dynamically typed expressions (Any) are disallowed
+    # Line-length: let formatter handle; only flag hard violations
+    "E501",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["research", "qwenvl", "qwen_vl_utils"]
+lines-after-imports = 2
+
+[tool.ruff.lint.per-file-ignores]
+# Test files: relax annotation and docstring requirements
+"**/tests/**/*.py" = ["ANN", "D"]
+# __init__.py files: allow unused imports (re-exports)
+"**/__init__.py" = ["F401", "F403", "F811"]
+# Scripts and notebooks: relax everything
+"**/tools/**/*.py" = ["ANN", "D"]
+"**/cookbooks/**/*.py" = ["ANN", "D", "E", "F"]
+"**/evaluation/**/*.py" = ["ANN", "D"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"

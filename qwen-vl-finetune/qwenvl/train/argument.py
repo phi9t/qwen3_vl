@@ -13,6 +13,12 @@ class ModelArguments:
 @dataclass
 class DataArguments:
     dataset_use: str = field(default="")
+    dataset_eval_use: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Optional eval dataset names (comma-separated) registered in qwenvl/data/__init__.py"
+        },
+    )
     data_flatten: bool = field(default=False)
     data_packing: bool = field(default=False)
     base_interval: int = field(default=2)

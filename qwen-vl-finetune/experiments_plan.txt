@@ -1,0 +1,128 @@
+Autoresearch-style finetuning experiment plan (Qwen3-VL)
+======================================================
+
+This plan follows the spirit of https://github.com/karpathy/autoresearch:
+- one canonical launch script you edit per trial
+- each trial is identified by a git commit hash
+- logs are captured to run.log
+- a single TSV holds the results
+
+Repo-specific wiring already in place:
+- Train entrypoint: qwen-vl-finetune/qwenvl/train/train_qwen.py
+- Eval dataset support: --dataset_eval_use <name> (comma-separated)
+- Greppable footer lines printed at end of training:
+  - val_loss: <float>
+  - peak_vram_mb: <float>
+- Canonical launcher: qwen-vl-finetune/scripts/sft_qwen3_8b.sh (8B retarget of the 4B launcher)
+  - Supports env overrides: DATASETS, EVAL_DATASETS, MAX_STEPS, EVAL_STEPS, SAVE_STEPS, OUTPUT_DIR
+  - Defaults to: cambrian_10m_train / cambrian_10m_val
+  - Defaults to 8 GPUs on one node: NPROC_PER_NODE=$(nvidia-smi --list-gpus | wc -l)
+
+Dataset choice and local paths
+------------------------------
+Public dataset: TIGER-Lab/VisualWebInstruct (config=conversation)
+
+Local materialization root (user-local):
+  /data02/home/philip.yang/datasets/visualwebinstruct
+
+Expected files:
+  /data02/home/philip.yang/datasets/visualwebinstruct/train.jsonl
+  /data02/home/philip.yang/datasets/visualwebinstruct/val.jsonl
+  /data02/home/philip.yang/datasets/visualwebinstruct/images/<...>.jpg
+
+Dataset registry names (already added in qwen-vl-finetune/qwenvl/data/__init__.py):
+  - visualwebinstruct_train
+  - visualwebinstruct_val
+
+Compute setup (fixed)
+---------------------
+- Single node, 8x B200
+- 5k steps per trial (hours)
+- Logging backend: logs + TSV only (no W&B)
+
+Fixed settings across all trials (unless explicitly swept)
+----------------------------------------------------------
+- model: Qwen/Qwen3-VL-8B-Instruct
+- dataset_use: visualwebinstruct_train
+- dataset_eval_use: visualwebinstruct_val
+- max_steps: 5000
+- eval_strategy: steps
+- eval_steps: 500
+- save_strategy: steps
+- save_steps: 1000
+- seed: 42
+- bf16: enabled
+- model_max_length: 8192
+- image resolution budget: max_pixels=224^2 (50176), min_pixels=28^2 (784)
+- gradient_checkpointing: False (default for 8B on B200; flip back to True if Phase C 336² OOMs)
+
+Primary metric
+--------------
+- val_loss (lower is better)
+
+How to run a trial (manual)
+---------------------------
+1) Ensure you are on branch autoresearch/<tag>-qwen3vl.
+2) Edit qwen-vl-finetune/scripts/sft_qwen3_8b.sh hyperparams (lr/batch/accum/flags).
+3) git commit -am "trial: <short description>"
+4) Run:
+   bash qwen-vl-finetune/scripts/sft_qwen3_8b.sh > run.log 2>&1
+5) Extract greppable footer:
+   grep -E '^val_loss:|^peak_vram_mb:' run.log
+6) Append to results TSV (untracked):
+   commit<TAB>val_loss<TAB>peak_mem_gb<TAB>status<TAB>description
+
+Sequential experiment schedule (automated)
+------------------------------------------
+The runner executes the following schedule sequentially:
+
+Phase A: regime selection (3 runs; same lr/batch)
+  A1 Projector-only
+     tune_mm_mlp=True, tune_mm_llm=False, tune_mm_vision=False, lora_enable=False
+  A2 Projector+LLM
+     tune_mm_mlp=True, tune_mm_llm=True, tune_mm_vision=False, lora_enable=False
+  A3 LoRA
+     lora_enable=True (r=16, alpha=32, dropout=0.0), tune_mm_* ignored, lr=2e-4
+
+After Phase A, pick the best regime by lowest val_loss.
+
+Phase B: LR x effective-batch sweep (6 runs; chosen regime)
+  learning_rate in {5e-6, 1e-5, 2e-5}
+  effective batch variant in:
+    - Bsmall: per_device_train_batch_size=4, gradient_accumulation_steps=2
+    - Bmed:   per_device_train_batch_size=8, gradient_accumulation_steps=2
+
+After Phase B, pick best (lowest val_loss).
+
+Phase C: resolution/context sweep (4 runs; chosen settings so far)
+  C1 max_pixels=224^2, model_max_length=8192
+  C2 max_pixels=336^2, model_max_length=8192
+  C3 max_pixels=224^2, model_max_length=4096
+  C4 max_pixels=336^2, model_max_length=4096
+
+After Phase C, pick best.
+
+Phase D: schedule polish (6 runs; chosen settings so far)
+  warmup_ratio in {0.0, 0.03, 0.05}
+  weight_decay in {0.0, 0.01}
+
+Total runs executed (if no crashes): 3 + 6 + 4 + 6 = 19
+
+Artifacts and monitoring
+------------------------
+The runner writes:
+- per-run logs under: qwen-vl-finetune/experiments/runs/<trial_name>/run.log
+- results table: qwen-vl-finetune/experiments/results.tsv
+
+Monitoring commands:
+- tail -f qwen-vl-finetune/experiments/runner.log
+- tail -n 5 qwen-vl-finetune/experiments/results.tsv
+- grep -R "^val_loss:" qwen-vl-finetune/experiments/runs/*/run.log | tail
+
+Notes / caveats
+---------------
+- Cambrian-10M on HF is image-only (no conversations) and is not compatible with this SFT pipeline.
+- This plan assumes VisualWebInstruct has been materialized to local JSONL + images.
+- If a run crashes/OOMs, it will be recorded in results.tsv with status=crash and the runner continues.
+- DeepSpeed is disabled by default in the launcher (DEEPSPEED_CONFIG="").
+- The CUDA toolkit runtime path is exported in the launcher to ensure NVRTC is found.

@@ -4,6 +4,7 @@ import logging
 import re
 import time
 import itertools
+from dataclasses import replace
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Sequence, List, Tuple, Any
 from collections.abc import Sequence
@@ -269,11 +270,15 @@ class LazySupervisedDataset(Dataset):
         list_data_dict = []
 
         for data in dataset_list:
-            file_format = data["annotation_path"].split(".")[-1]
+            ann_path = Path(data["annotation_path"])
+            if not ann_path.is_absolute():
+                ann_path = Path(data["data_path"]) / ann_path
+
+            file_format = ann_path.suffix.lstrip(".")
             if file_format == "jsonl":
-                annotations = read_jsonl(data["annotation_path"])
+                annotations = read_jsonl(str(ann_path))
             else:
-                annotations = json.load(open(data["annotation_path"], "r"))
+                annotations = json.load(open(str(ann_path), "r"))
             sampling_rate = data.get("sampling_rate", 1.0)
             if sampling_rate < 1.0:
                 annotations = random.sample(
@@ -675,18 +680,40 @@ class FlattenedDataCollatorForSupervisedDataset(DataCollatorForSupervisedDataset
         return batch
 
 
-def make_supervised_data_module(processor, data_args) -> Dict:
-    """Make dataset and collator for supervised fine-tuning."""
-    train_dataset = LazySupervisedDataset(processor, data_args=data_args)
+def make_supervised_data_module(processor, data_args, do_train: bool = True, do_eval: bool = False) -> Dict:
+    """Make dataset and collator for supervised fine-tuning.
+
+    This supports eval-only runs by allowing `train_dataset` to be omitted when `do_train=False`.
+    """
+
+    train_dataset = None
+    if do_train:
+        if not getattr(data_args, "dataset_use", ""):
+            raise ValueError("`dataset_use` must be set when do_train=True")
+        train_dataset = LazySupervisedDataset(processor, data_args=data_args)
+
+    eval_dataset = None
+    if do_eval:
+        dataset_eval_use = getattr(data_args, "dataset_eval_use", None)
+        if not dataset_eval_use:
+            raise ValueError("`dataset_eval_use` must be set when do_eval=True")
+        eval_args = replace(data_args, dataset_use=dataset_eval_use)
+        # Preserve dynamically attached fields from the training path (e.g. set in train_qwen.py)
+        if hasattr(data_args, "model_type"):
+            eval_args.model_type = data_args.model_type
+        eval_dataset = LazySupervisedDataset(processor, data_args=eval_args)
+
     if data_args.data_flatten or data_args.data_packing:
         data_collator = FlattenedDataCollatorForSupervisedDataset(processor.tokenizer)
-        return dict(
-            train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator
-        )
-    data_collator = DataCollatorForSupervisedDataset(processor.tokenizer)
-    return dict(
-        train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator
-    )
+    else:
+        data_collator = DataCollatorForSupervisedDataset(processor.tokenizer)
+
+    out = {"data_collator": data_collator}
+    if train_dataset is not None:
+        out["train_dataset"] = train_dataset
+    if eval_dataset is not None:
+        out["eval_dataset"] = eval_dataset
+    return out
 
 
 if __name__ == "__main__":
