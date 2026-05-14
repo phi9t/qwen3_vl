@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import pathlib
 
@@ -10,6 +11,7 @@ import research.adapters
 import research.artifacts
 import research.db
 import research.models
+import research.temporal
 
 
 DEFAULT_DB = pathlib.Path(".research") / "research.sqlite"
@@ -26,7 +28,15 @@ def build_parser() -> argparse.ArgumentParser:
     db_subparsers.add_parser("init")
 
     subparsers.add_parser("status")
-    subparsers.add_parser("manager")
+    manager_parser = subparsers.add_parser("manager")
+    manager_parser.add_argument(
+        "--address",
+        default=research.temporal.DEFAULT_ADDRESS,
+    )
+    manager_parser.add_argument(
+        "--task-queue",
+        default=research.temporal.DEFAULT_TASK_QUEUE,
+    )
 
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("id")
@@ -80,6 +90,38 @@ def command_probe(args: argparse.Namespace, db_path: pathlib.Path) -> int:
     return 0
 
 
+def build_worker_config(address: str, task_queue: str) -> dict[str, object]:
+    """Build the Temporal worker registration config."""
+    import research.activities
+    import research.workflows
+
+    return {
+        "address": address,
+        "task_queue": task_queue,
+        "workflows": [
+            research.workflows.ProbeWorkflow,
+            research.workflows.TrialWorkflow,
+        ],
+        "activities": [research.activities.run_trial_activity],
+    }
+
+
+async def run_manager(address: str, task_queue: str) -> None:
+    """Run the Temporal worker for research experiment workflows."""
+    import temporalio.client
+    import temporalio.worker
+
+    config = build_worker_config(address, task_queue)
+    client = await temporalio.client.Client.connect(str(config["address"]))
+    worker = temporalio.worker.Worker(
+        client,
+        task_queue=str(config["task_queue"]),
+        workflows=list(config["workflows"]),
+        activities=list(config["activities"]),
+    )
+    await worker.run()
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the research command-line interface."""
     parser = build_parser()
@@ -94,7 +136,10 @@ def main(argv: list[str] | None = None) -> int:
         return command_status(db_path)
     if args.command == "probe":
         return command_probe(args, db_path)
-    if args.command in {"manager", "report"}:
+    if args.command == "manager":
+        asyncio.run(run_manager(args.address, args.task_queue))
+        return 0
+    if args.command == "report":
         parser.error(f"{args.command} is not implemented in this migration step")
     raise AssertionError(args.command)
 
