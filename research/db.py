@@ -191,6 +191,17 @@ def get_experiment(db_path: pathlib.Path, experiment_id: int) -> JsonDict:
     return _row(row)
 
 
+def get_trial_run(db_path: pathlib.Path, trial_run_id: int) -> JsonDict:
+    """Return a JSON-decoded trial run row by id."""
+    with contextlib.closing(connect(db_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM trial_runs WHERE id = ?", (trial_run_id,)
+        ).fetchone()
+    if row is None:
+        raise KeyError(f"trial run not found: {trial_run_id}")
+    return _row(row)
+
+
 def create_trial_run(
     db_path: pathlib.Path, *, experiment_id: int, attempt: int
 ) -> int:
@@ -228,10 +239,12 @@ def transition_intent(
 ) -> None:
     """Update an intent's status and optional score."""
     with contextlib.closing(connect(db_path)) as conn:
-        conn.execute(
+        cur = conn.execute(
             "UPDATE intents SET status = ?, score_json = ? WHERE id = ?",
             (status, _dump(score), intent_id),
         )
+        if cur.rowcount != 1:
+            raise KeyError(f"intent not found: {intent_id}")
         conn.commit()
 
 
@@ -245,16 +258,18 @@ def transition_experiment(
     """Update an experiment's status and optional Temporal workflow id."""
     with contextlib.closing(connect(db_path)) as conn:
         if workflow_id is None:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE experiments SET status = ?, updated_at = ? WHERE id = ?",
                 (status, utc_now(), experiment_id),
             )
         else:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE experiments SET status = ?, temporal_workflow_id = ?,"
                 " updated_at = ? WHERE id = ?",
                 (status, workflow_id, utc_now(), experiment_id),
             )
+        if cur.rowcount != 1:
+            raise KeyError(f"experiment not found: {experiment_id}")
         conn.commit()
 
 
@@ -273,7 +288,7 @@ def transition_trial_run(
         utc_now() if status in {"succeeded", "failed", "cancelled"} else None
     )
     with contextlib.closing(connect(db_path)) as conn:
-        conn.execute(
+        cur = conn.execute(
             """
             UPDATE trial_runs
             SET status = ?, finished_at = ?, heartbeat_json = ?, metrics_json = ?,
@@ -290,4 +305,6 @@ def transition_trial_run(
                 trial_run_id,
             ),
         )
+        if cur.rowcount != 1:
+            raise KeyError(f"trial run not found: {trial_run_id}")
         conn.commit()
