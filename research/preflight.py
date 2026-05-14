@@ -22,23 +22,41 @@ def run_preflight(
     Returns:
         A PreflightResult with combined checks, ok flag, and message.
     """
-    checks: dict[str, object] = {
+    generic_checks: dict[str, object] = {
         "adapter": adapter.name,
         "uv": "ok" if shutil.which("uv") else "missing",
         "db": "ok" if context.db_path.exists() else "missing",
     }
-    context.worktree.mkdir(parents=True, exist_ok=True)
-    context.artifact_dir.mkdir(parents=True, exist_ok=True)
-    checks["worktree"] = "ok" if context.worktree.exists() else "missing"
-    checks["artifact_dir"] = "ok" if context.artifact_dir.exists() else "missing"
+    try:
+        context.worktree.mkdir(parents=True, exist_ok=True)
+        context.artifact_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        generic_checks["worktree"] = (
+            "ok" if context.worktree.is_dir() else f"error: {exc}"
+        )
+        generic_checks["artifact_dir"] = (
+            "ok" if context.artifact_dir.is_dir() else f"error: {exc}"
+        )
+        return research.models.PreflightResult(
+            ok=False,
+            checks=generic_checks,
+            message="preflight failed",
+        )
+    generic_checks["worktree"] = "ok" if context.worktree.is_dir() else "missing"
+    generic_checks["artifact_dir"] = (
+        "ok" if context.artifact_dir.is_dir() else "missing"
+    )
 
     adapter_result = adapter.preflight(intent, context)
-    checks.update(adapter_result.checks)
+    checks = {
+        **adapter_result.checks,
+        **generic_checks,
+    }
     ok = (
-        checks["uv"] == "ok"
-        and checks["db"] == "ok"
-        and checks["worktree"] == "ok"
-        and checks["artifact_dir"] == "ok"
+        generic_checks["uv"] == "ok"
+        and generic_checks["db"] == "ok"
+        and generic_checks["worktree"] == "ok"
+        and generic_checks["artifact_dir"] == "ok"
         and adapter_result.ok
     )
     message = adapter_result.message if ok else "preflight failed"
