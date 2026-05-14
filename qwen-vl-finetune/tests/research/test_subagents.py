@@ -1,6 +1,11 @@
 from pathlib import Path
 
-from research.subagents import AgentProvider, SubagentTask, build_command, discover_providers
+from research.subagents import (
+    AgentProvider,
+    SubagentTask,
+    build_command,
+    discover_providers,
+)
 
 
 def test_build_coco_command() -> None:

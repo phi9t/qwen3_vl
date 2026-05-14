@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from research.experiment_helpers import (
     append_result_row_from_analysis,
@@ -70,7 +71,11 @@ def plan_probe_trials_activity(profile: str) -> list[dict]:
 
 
 @activity.defn
-def run_trial_activity(spec_payload: dict, dry_run: bool = False) -> dict:
+def run_trial_activity(
+    spec_payload: dict,
+    dry_run: bool = False,
+    fail_on_crash: bool = False,
+) -> dict:
     root = repo_root()
     spec = TrialSpec(**spec_payload)
     analysis = SupervisorTrialRunner(root).run_from_spec(spec, dry_run=dry_run)
@@ -80,7 +85,17 @@ def run_trial_activity(spec_payload: dict, dry_run: bool = False) -> dict:
         analysis,
         git_commit=git_short(root),
     )
-    return analysis.to_payload()
+    payload = analysis.to_payload()
+    if fail_on_crash and analysis.status != "ok":
+        trial_id = f"{spec.profile}/{spec.phase}/{spec.trial}"
+        failure_reason = payload.get("failure_reason", "unknown")
+        raise ApplicationError(
+            f"Trial {trial_id} failed: {failure_reason}",
+            payload,
+            type="TrialFailed",
+            non_retryable=True,
+        )
+    return payload
 
 
 @activity.defn

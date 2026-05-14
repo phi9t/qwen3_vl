@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from research.models import FailureReason, TrialMetrics
+from research.models import FailureReason
 from research.observability.log_parser import parse_metrics_and_symptoms
 from research.observability.schema import TrialAnalysis
 

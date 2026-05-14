@@ -10,7 +10,11 @@ from research.models import FailureReason, TrialSpec
 from research.observability.analyzer import analyze_trial
 from research.observability.artifact_store import ArtifactRoot
 from research.observability.artifacts import TrialArtifactStore
-from research.observability.schema import ResolvedTrialConfig, TrialAnalysis, TrialIntent
+from research.observability.schema import (
+    ResolvedTrialConfig,
+    TrialAnalysis,
+    TrialIntent,
+)
 from research.observability.system_snapshot import collect_system_snapshot
 
 

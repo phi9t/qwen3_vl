@@ -33,7 +33,7 @@ class SingleTrialWorkflow:
         self.active_trial = spec["trial"]
         analysis = await workflow.execute_activity(
             run_trial_activity,
-            args=[spec, dry_run],
+            args=[spec, dry_run, True],
             start_to_close_timeout=timedelta(hours=6),
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
