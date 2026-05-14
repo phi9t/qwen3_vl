@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import pathlib
 
-from research import adapters, models
+import research.adapters
+import research.models
 
 
-def _load_qwen_adapter() -> models.ExperimentAdapter:
-    return adapters.load_adapter("qwen_vl")
+def _load_qwen_adapter() -> research.models.ExperimentAdapter:
+    return research.adapters.load_adapter("qwen_vl")
 
 
 def test_qwen_probe_intents_use_request_model_and_profile() -> None:
@@ -16,7 +17,7 @@ def test_qwen_probe_intents_use_request_model_and_profile() -> None:
     adapter = _load_qwen_adapter()
 
     intents = adapter.generate_probe_intents(
-        models.ProbeRequest(
+        research.models.ProbeRequest(
             model="Qwen/Qwen3-VL-8B-Instruct",
             profile="b200",
             objective={"metric": "throughput"},
@@ -41,7 +42,9 @@ def test_qwen_rejects_path_escape_profile() -> None:
     adapter = _load_qwen_adapter()
 
     try:
-        adapter.generate_probe_intents(models.ProbeRequest("model", "../outside"))
+        adapter.generate_probe_intents(
+            research.models.ProbeRequest("model", "../outside")
+        )
     except ValueError as exc:
         assert "Invalid profile name" in str(exc)
     else:
@@ -54,9 +57,9 @@ def test_qwen_build_trial_uses_existing_launcher(
     """Qwen trials should call the existing shell launcher."""
     adapter = _load_qwen_adapter()
     intent = adapter.generate_probe_intents(
-        models.ProbeRequest("Qwen/Qwen3-VL-8B-Instruct", "b200")
+        research.models.ProbeRequest("Qwen/Qwen3-VL-8B-Instruct", "b200")
     )[0]
-    context = models.TrialContext(
+    context = research.models.TrialContext(
         experiment_id=1,
         trial_run_id=1,
         attempt=1,
@@ -80,7 +83,7 @@ def test_qwen_analysis_requires_validation_metric(
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
     (artifact_dir / "run.log").write_text("peak_vram_mb: 123\n", encoding="utf-8")
-    context = models.TrialContext(
+    context = research.models.TrialContext(
         experiment_id=1,
         trial_run_id=1,
         attempt=1,

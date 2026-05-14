@@ -6,7 +6,10 @@ import argparse
 import contextlib
 import pathlib
 
-from research import db
+import research.adapters
+import research.artifacts
+import research.db
+import research.models
 
 
 DEFAULT_DB = pathlib.Path(".research") / "research.sqlite"
@@ -32,19 +35,48 @@ def build_parser() -> argparse.ArgumentParser:
     probe_parser.add_argument("--adapter", required=True)
     probe_parser.add_argument("--model", required=True)
     probe_parser.add_argument("--profile", required=True)
+    probe_parser.add_argument("--artifact-root", default="")
     return parser
 
 
 def command_status(db_path: pathlib.Path) -> int:
     """Print a compact experiment status summary."""
-    db.init_db(db_path)
-    with contextlib.closing(db.connect(db_path)) as conn:
+    research.db.init_db(db_path)
+    with contextlib.closing(research.db.connect(db_path)) as conn:
         count = conn.execute("SELECT COUNT(*) FROM experiments").fetchone()[0]
 
     if count == 0:
         print("No experiments")
     else:
         print(f"Experiments: {count}")
+    return 0
+
+
+def command_probe(args: argparse.Namespace, db_path: pathlib.Path) -> int:
+    """Generate candidate intents and queue experiments."""
+    research.db.init_db(db_path)
+    adapter = research.adapters.load_adapter(args.adapter)
+    request = research.models.ProbeRequest(model=args.model, profile=args.profile)
+    artifact_root = (
+        pathlib.Path(args.artifact_root)
+        if args.artifact_root
+        else research.artifacts.default_artifact_root()
+    )
+    intents = adapter.generate_probe_intents(request)
+
+    experiment_ids = []
+    for intent in intents:
+        intent_id = research.db.insert_intent(db_path, intent)
+        experiment_id = research.db.create_experiment(
+            db_path,
+            intent_id=intent_id,
+            adapter=args.adapter,
+            artifact_root=str(artifact_root),
+            artifact_subdir=f"{adapter.name}/{intent_id}",
+        )
+        experiment_ids.append(experiment_id)
+
+    print(f"Created {len(experiment_ids)} experiments")
     return 0
 
 
@@ -55,12 +87,14 @@ def main(argv: list[str] | None = None) -> int:
     db_path = pathlib.Path(args.db)
 
     if args.command == "db" and args.db_command == "init":
-        db.init_db(db_path)
+        research.db.init_db(db_path)
         print(db_path)
         return 0
     if args.command == "status":
         return command_status(db_path)
-    if args.command in {"manager", "probe", "report"}:
+    if args.command == "probe":
+        return command_probe(args, db_path)
+    if args.command in {"manager", "report"}:
         parser.error(f"{args.command} is not implemented in this migration step")
     raise AssertionError(args.command)
 
