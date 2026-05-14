@@ -63,3 +63,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in {"manager", "probe", "report"}:
         parser.error(f"{args.command} is not implemented in this migration step")
     raise AssertionError(args.command)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
