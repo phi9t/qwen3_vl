@@ -1,5 +1,8 @@
-import tomllib
+from __future__ import annotations
+
 from pathlib import Path
+
+import tomllib
 
 
 def test_research_package_imports() -> None:
