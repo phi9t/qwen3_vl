@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import traceback
 
 import temporalio.activity
 
@@ -50,6 +51,15 @@ def _write_preflight(
     return preflight_path
 
 
+def _failed_report(reason: str, message: str) -> research.models.TrialReport:
+    return research.models.TrialReport(
+        status="failed",
+        metrics={},
+        failure={"reason": reason, "message": message},
+        summary=message,
+    )
+
+
 @temporalio.activity.defn
 def run_trial_activity(
     db_path_s: str,
@@ -84,36 +94,56 @@ def run_trial_activity(
     )
 
     research.db.transition_experiment(db_path, experiment_id, "running")
-    preflight = research.preflight.run_preflight(adapter, intent, context)
-    _write_preflight(artifact_dir, preflight)
+    try:
+        preflight = research.preflight.run_preflight(adapter, intent, context)
+        _write_preflight(artifact_dir, preflight)
 
-    if not preflight.ok:
-        report = research.models.TrialReport(
-            status="failed",
-            metrics={},
-            failure={
-                "reason": "preflight_failed",
-                "checks": preflight.checks,
-            },
-            summary=preflight.message,
-        )
-    else:
-        research.db.transition_trial_run(db_path, trial_run_id, "running")
-        command = adapter.build_trial(intent, context)
-        run_result = research.runners.run_trial_command(adapter, command, context)
-        report = adapter.analyze_result(context)
-        if run_result.returncode != 0 and report.status == "succeeded":
+        if not preflight.ok:
             report = research.models.TrialReport(
                 status="failed",
-                metrics=report.metrics,
+                metrics={},
                 failure={
-                    "reason": "launcher_failed",
-                    "returncode": run_result.returncode,
+                    "reason": "preflight_failed",
+                    "checks": preflight.checks,
                 },
-                summary=f"trial command exited {run_result.returncode}",
+                summary=preflight.message,
             )
+        else:
+            research.db.transition_trial_run(db_path, trial_run_id, "running")
+            command = adapter.build_trial(intent, context)
+            run_result = research.runners.run_trial_command(adapter, command, context)
+            report = adapter.analyze_result(context)
+            if run_result.returncode != 0 and report.status == "succeeded":
+                report = research.models.TrialReport(
+                    status="failed",
+                    metrics=report.metrics,
+                    failure={
+                        "reason": "launcher_failed",
+                        "returncode": run_result.returncode,
+                    },
+                    summary=f"trial command exited {run_result.returncode}",
+                )
+    except Exception as exc:
+        report = _failed_report(
+            "activity_exception",
+            f"{type(exc).__name__}: {exc}",
+        )
 
-    paths = research.reports.write_report(artifact_dir, report)
+    report_path = ""
+    try:
+        paths = research.reports.write_report(artifact_dir, report)
+        report_path = str(paths["markdown"])
+    except Exception as exc:
+        report = research.models.TrialReport(
+            status="failed",
+            metrics=report.metrics,
+            failure={
+                **report.failure,
+                "report_write_failed": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc(),
+            },
+            summary=report.summary,
+        )
     terminal = "succeeded" if report.status == "succeeded" else "failed"
     research.db.transition_trial_run(
         db_path,
@@ -121,7 +151,7 @@ def run_trial_activity(
         terminal,
         metrics=report.metrics,
         failure=report.failure,
-        report_path=str(paths["markdown"]),
+        report_path=report_path,
     )
     research.db.transition_experiment(db_path, experiment_id, terminal)
     return {
