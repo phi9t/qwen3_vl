@@ -36,8 +36,7 @@ def load_adapter(name_or_path: str) -> models.ExperimentAdapter:
 def _split_target(target: str, source: str) -> tuple[str, str]:
     if ":" not in target:
         raise ValueError(
-            "Expected adapter path 'module:Class' or 'file.py:Class', "
-            f"got {source!r}."
+            f"Expected adapter path 'module:Class' or 'file.py:Class', got {source!r}."
         )
     return target.split(":", 1)
 
@@ -51,7 +50,11 @@ def _load_module(module_name: str) -> object:
 def _load_file_module(module_name: str) -> object:
     module_path = pathlib.Path(module_name)
     if not module_path.is_absolute():
-        module_path = pathlib.Path.cwd() / module_path
+        cwd_path = pathlib.Path.cwd() / module_path
+        if cwd_path.exists():
+            module_path = cwd_path
+        else:
+            module_path = pathlib.Path(__file__).resolve().parents[1] / module_path
     spec = importlib.util.spec_from_file_location(module_path.stem, module_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load adapter module from {module_path}.")
