@@ -74,23 +74,27 @@ def _capture_output(
             line, pending = pending.split("\n", 1)
             _record_line(adapter, log_file, progress, f"{line}\n")
 
+    stdout_open = True
     try:
-        while True:
+        while stdout_open:
             for _key, _mask in selector.select(_STDOUT_POLL_SECONDS):
                 chunk = os.read(file_descriptor, 8192)
-                if chunk:
-                    process_text(decoder.decode(chunk))
+                if not chunk:
+                    stdout_open = False
+                    break
+                process_text(decoder.decode(chunk))
             if proc.poll() is not None:
                 while selector.select(0):
                     chunk = os.read(file_descriptor, 8192)
                     if not chunk:
+                        stdout_open = False
                         break
                     process_text(decoder.decode(chunk))
-                remaining = pending + decoder.decode(b"", final=True)
-                if remaining:
-                    _record_line(adapter, log_file, progress, remaining)
-                break
+                stdout_open = False
     finally:
+        remaining = pending + decoder.decode(b"", final=True)
+        if remaining:
+            _record_line(adapter, log_file, progress, remaining)
         selector.unregister(proc.stdout)
         selector.close()
         proc.stdout.close()

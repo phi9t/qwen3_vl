@@ -112,3 +112,34 @@ def test_run_trial_command_does_not_hang_on_inherited_stdout(
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_run_trial_command_does_not_spin_after_stdout_eof(
+    tmp_path: pathlib.Path,
+) -> None:
+    adapter = research.adapters.load_adapter("tests.research.fake_adapter:FakeAdapter")
+    context = research.models.TrialContext(
+        experiment_id=1,
+        trial_run_id=1,
+        attempt=1,
+        worktree=tmp_path,
+        artifact_dir=tmp_path / "artifacts",
+        db_path=tmp_path / "research.sqlite",
+    )
+    command = research.models.TrialCommand(
+        argv=[
+            sys.executable,
+            "-c",
+            (
+                "import os, sys, time; "
+                "os.close(sys.stdout.fileno()); "
+                "os.close(sys.stderr.fileno()); "
+                "time.sleep(0.2)"
+            ),
+        ],
+    )
+
+    result = research.runners.run_trial_command(adapter, command, context)
+
+    assert result.returncode == 0
+    assert result.progress == []
