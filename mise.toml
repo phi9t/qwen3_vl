@@ -1,0 +1,17 @@
+[tasks.research-db-init]
+run = "uv run research db init"
+
+[tasks.research-probe]
+run = "uv run research probe --adapter {{arg(name='adapter')}} --model {{arg(name='model')}} --profile {{arg(name='profile')}}"
+
+[tasks.research-manager]
+run = "uv run research manager"
+
+[tasks.research-status]
+run = "uv run research status"
+
+[tasks.research-report]
+run = "uv run research report {{arg(name='id')}}"
+
+[tasks.qwen-probe-b200]
+run = "uv run research probe --adapter qwen_vl --model Qwen/Qwen3-VL-8B-Instruct --profile b200"
