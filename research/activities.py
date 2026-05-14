@@ -1,0 +1,131 @@
+"""Temporal activities for executing research experiment trials."""
+
+from __future__ import annotations
+
+import json
+import pathlib
+
+import temporalio.activity
+
+import research.adapters
+import research.artifacts
+import research.db
+import research.models
+import research.preflight
+import research.reports
+import research.runners
+
+
+def _intent_from_row(row: dict[str, object]) -> research.models.Intent:
+    return research.models.Intent(
+        adapter=str(row["adapter"]),
+        model=str(row["model"]),
+        profile=str(row["profile"]),
+        phase=str(row["phase"]),
+        name=str(row["name"]),
+        config=dict(row["config_json"]),
+        objective=dict(row["objective_json"]),
+        source=str(row["source"]),
+    )
+
+
+def _write_preflight(
+    artifact_dir: pathlib.Path,
+    preflight: research.models.PreflightResult,
+) -> pathlib.Path:
+    preflight_path = artifact_dir / "preflight.json"
+    preflight_path.write_text(
+        json.dumps(
+            {
+                "ok": preflight.ok,
+                "checks": preflight.checks,
+                "message": preflight.message,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return preflight_path
+
+
+@temporalio.activity.defn
+def run_trial_activity(
+    db_path_s: str,
+    experiment_id: int,
+    attempt: int = 1,
+) -> dict[str, object]:
+    """Run one trial attempt and persist its terminal report state."""
+    db_path = pathlib.Path(db_path_s)
+    experiment = research.db.get_experiment(db_path, experiment_id)
+    intent = _intent_from_row(
+        research.db.get_intent(db_path, int(experiment["intent_id"]))
+    )
+    adapter = research.adapters.load_adapter(str(experiment["adapter"]))
+    artifact_dir = research.artifacts.attempt_dir(
+        pathlib.Path(str(experiment["artifact_root"])),
+        adapter=adapter.name,
+        experiment_id=experiment_id,
+        attempt=attempt,
+    )
+    trial_run_id = research.db.create_trial_run(
+        db_path,
+        experiment_id=experiment_id,
+        attempt=attempt,
+    )
+    context = research.models.TrialContext(
+        experiment_id=experiment_id,
+        trial_run_id=trial_run_id,
+        attempt=attempt,
+        worktree=pathlib.Path.cwd(),
+        artifact_dir=artifact_dir,
+        db_path=db_path,
+    )
+
+    research.db.transition_experiment(db_path, experiment_id, "running")
+    preflight = research.preflight.run_preflight(adapter, intent, context)
+    _write_preflight(artifact_dir, preflight)
+
+    if not preflight.ok:
+        report = research.models.TrialReport(
+            status="failed",
+            metrics={},
+            failure={
+                "reason": "preflight_failed",
+                "checks": preflight.checks,
+            },
+            summary=preflight.message,
+        )
+    else:
+        research.db.transition_trial_run(db_path, trial_run_id, "running")
+        command = adapter.build_trial(intent, context)
+        run_result = research.runners.run_trial_command(adapter, command, context)
+        report = adapter.analyze_result(context)
+        if run_result.returncode != 0 and report.status == "succeeded":
+            report = research.models.TrialReport(
+                status="failed",
+                metrics=report.metrics,
+                failure={
+                    "reason": "launcher_failed",
+                    "returncode": run_result.returncode,
+                },
+                summary=f"trial command exited {run_result.returncode}",
+            )
+
+    paths = research.reports.write_report(artifact_dir, report)
+    terminal = "succeeded" if report.status == "succeeded" else "failed"
+    research.db.transition_trial_run(
+        db_path,
+        trial_run_id,
+        terminal,
+        metrics=report.metrics,
+        failure=report.failure,
+        report_path=str(paths["markdown"]),
+    )
+    research.db.transition_experiment(db_path, experiment_id, terminal)
+    return {
+        "status": report.status,
+        "metrics": report.metrics,
+        "failure": report.failure,
+    }
