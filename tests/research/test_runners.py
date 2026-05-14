@@ -7,15 +7,15 @@ import subprocess
 import sys
 import textwrap
 
-import research.adapters
 import research.models
 import research.runners
+import tests.research.fake_adapter
 
 
 def test_run_trial_command_writes_log_and_progress(
     tmp_path: pathlib.Path,
 ) -> None:
-    adapter = research.adapters.load_adapter("tests.research.fake_adapter:FakeAdapter")
+    adapter = tests.research.fake_adapter.FakeAdapter()
     context = research.models.TrialContext(
         experiment_id=1,
         trial_run_id=1,
@@ -39,10 +39,9 @@ def test_run_trial_command_writes_log_and_progress(
 
     assert result.returncode == 0
     assert result.progress[-1].metrics == {"metric": 1.0}
-    assert (
-        (context.artifact_dir / "run.log").read_text(encoding="utf-8").strip()
-        == "metric=1.0"
-    )
+    assert (context.artifact_dir / "run.log").read_text(
+        encoding="utf-8"
+    ).strip() == "metric=1.0"
 
 
 def test_run_trial_command_does_not_hang_on_inherited_stdout(
@@ -117,7 +116,7 @@ def test_run_trial_command_does_not_hang_on_inherited_stdout(
 def test_run_trial_command_does_not_spin_after_stdout_eof(
     tmp_path: pathlib.Path,
 ) -> None:
-    adapter = research.adapters.load_adapter("tests.research.fake_adapter:FakeAdapter")
+    adapter = tests.research.fake_adapter.FakeAdapter()
     context = research.models.TrialContext(
         experiment_id=1,
         trial_run_id=1,

@@ -8,6 +8,7 @@ import pathlib
 import research.activities
 import research.db
 import research.models
+import tests.research.fake_adapter
 
 
 class FailingPreflightAdapter:
@@ -108,15 +109,21 @@ def _create_experiment(
     return db_path, artifact_root, intent_id, experiment_id
 
 
-def test_run_trial_activity_updates_db_and_writes_report(
+def test_run_trial_with_adapter_updates_db_and_writes_report(
     tmp_path: pathlib.Path,
 ) -> None:
     db_path, artifact_root, intent_id, experiment_id = _create_experiment(
         tmp_path,
-        "tests.research.fake_adapter:FakeAdapter",
+        "fake",
     )
 
-    result = research.activities.run_trial_activity(str(db_path), experiment_id, 1)
+    result = research.activities.run_trial_with_adapter(
+        str(db_path),
+        experiment_id,
+        tests.research.fake_adapter.FakeAdapter(),
+        1,
+        tmp_path,
+    )
 
     artifact_dir = artifact_root / "fake" / str(experiment_id) / "attempt-1"
     report_path = artifact_dir / "report.md"
@@ -153,17 +160,25 @@ def test_run_trial_activity_updates_db_and_writes_report(
     assert trial_run["report_path"] == str(report_path)
 
 
-def test_run_trial_activity_persists_preflight_failure(
+def test_run_trial_with_adapter_persists_preflight_failure(
     tmp_path: pathlib.Path,
 ) -> None:
     db_path, artifact_root, _intent_id, experiment_id = _create_experiment(
         tmp_path,
-        "tests.research.test_activities:FailingPreflightAdapter",
+        "failing_preflight",
     )
 
-    result = research.activities.run_trial_activity(str(db_path), experiment_id, 1)
+    result = research.activities.run_trial_with_adapter(
+        str(db_path),
+        experiment_id,
+        FailingPreflightAdapter(),
+        1,
+        tmp_path,
+    )
 
-    artifact_dir = artifact_root / "failing_preflight" / str(experiment_id) / "attempt-1"
+    artifact_dir = (
+        artifact_root / "failing_preflight" / str(experiment_id) / "attempt-1"
+    )
     trial_run = research.db.get_trial_run(db_path, 1)
     assert result["status"] == "failed"
     assert result["failure"]["reason"] == "preflight_failed"
@@ -174,44 +189,27 @@ def test_run_trial_activity_persists_preflight_failure(
     assert (artifact_dir / "report.md").exists()
 
 
-def test_run_trial_activity_persists_adapter_exception(
+def test_run_trial_with_adapter_persists_adapter_exception(
     tmp_path: pathlib.Path,
 ) -> None:
     db_path, artifact_root, _intent_id, experiment_id = _create_experiment(
         tmp_path,
-        "tests.research.test_activities:BuildErrorAdapter",
+        "build_error",
     )
 
-    result = research.activities.run_trial_activity(str(db_path), experiment_id, 1)
+    result = research.activities.run_trial_with_adapter(
+        str(db_path),
+        experiment_id,
+        BuildErrorAdapter(),
+        1,
+        tmp_path,
+    )
 
     artifact_dir = artifact_root / "build_error" / str(experiment_id) / "attempt-1"
     trial_run = research.db.get_trial_run(db_path, 1)
     assert result["status"] == "failed"
     assert result["failure"]["reason"] == "activity_exception"
     assert "cannot build command" in result["failure"]["message"]
-    assert research.db.get_experiment(db_path, experiment_id)["status"] == "failed"
-    assert trial_run["status"] == "failed"
-    assert trial_run["failure_json"]["reason"] == "activity_exception"
-    assert (artifact_dir / "report.md").exists()
-
-
-def test_run_trial_activity_persists_adapter_load_failure(
-    tmp_path: pathlib.Path,
-) -> None:
-    db_path, artifact_root, _intent_id, experiment_id = _create_experiment(
-        tmp_path,
-        "tests.research.test_activities:MissingAdapter",
-    )
-
-    result = research.activities.run_trial_activity(str(db_path), experiment_id, 1)
-
-    artifact_dir = (
-        artifact_root / "adapter-load-failed" / str(experiment_id) / "attempt-1"
-    )
-    trial_run = research.db.get_trial_run(db_path, 1)
-    assert result["status"] == "failed"
-    assert result["failure"]["reason"] == "activity_exception"
-    assert "MissingAdapter" in result["failure"]["message"]
     assert research.db.get_experiment(db_path, experiment_id)["status"] == "failed"
     assert trial_run["status"] == "failed"
     assert trial_run["failure_json"]["reason"] == "activity_exception"

@@ -17,13 +17,7 @@ def default_temporal_db_path() -> pathlib.Path:
     configured = os.environ.get(TEMPORAL_DB_ENV)
     if configured:
         return pathlib.Path(configured).expanduser()
-    return (
-        pathlib.Path.home()
-        / ".automata"
-        / "research"
-        / "temporal"
-        / "temporal.db"
-    )
+    return pathlib.Path.home() / ".automata" / "research" / "temporal" / "temporal.db"
 
 
 def ensure_temporal_cli() -> str:

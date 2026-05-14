@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import pathlib
 
-import research.adapters
+import experiments.qwen_adapter
+
 import research.models
 
 
 def _load_qwen_adapter() -> research.models.ExperimentAdapter:
-    return research.adapters.load_adapter("qwen_vl")
+    return experiments.qwen_adapter.QwenVlAdapter()
 
 
 def test_qwen_probe_intents_use_request_model_and_profile() -> None:
@@ -30,8 +31,8 @@ def test_qwen_probe_intents_use_request_model_and_profile() -> None:
     assert all("DATASETS" in intent.config for intent in intents)
 
 
-def test_qwen_registry_adapter_loads() -> None:
-    """The generic adapter registry should load the Qwen adapter."""
+def test_qwen_adapter_instantiates_directly() -> None:
+    """Qwen experiment code should instantiate its adapter directly."""
     adapter = _load_qwen_adapter()
 
     assert adapter.name == "qwen_vl"

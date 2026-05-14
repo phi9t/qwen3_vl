@@ -1,12 +1,6 @@
 [tasks.research-db-init]
 run = "uv run research db init"
 
-[tasks.research-probe]
-run = "uv run research probe --adapter {{arg(name='adapter')}} --model {{arg(name='model')}} --profile {{arg(name='profile')}}"
-
-[tasks.research-manager]
-run = "uv run research manager"
-
 [tasks.research-status]
 run = "uv run research status"
 
@@ -14,4 +8,7 @@ run = "uv run research status"
 run = "uv run research report {{arg(name='id')}}"
 
 [tasks.qwen-probe-b200]
-run = "uv run research probe --adapter qwen_vl --model Qwen/Qwen3-VL-8B-Instruct --profile b200"
+run = "PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments probe --model Qwen/Qwen3-VL-8B-Instruct --profile b200"
+
+[tasks.qwen-manager]
+run = "PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments manager"

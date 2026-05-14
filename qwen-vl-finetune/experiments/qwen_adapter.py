@@ -5,7 +5,7 @@ from __future__ import annotations
 import itertools
 import pathlib
 
-from research import models
+import research.models
 
 
 _DEFAULT_PROFILE_VALUES = {
@@ -28,8 +28,8 @@ class QwenVlAdapter:
     name = "qwen_vl"
 
     def generate_probe_intents(
-        self, request: models.ProbeRequest
-    ) -> list[models.Intent]:
+        self, request: research.models.ProbeRequest
+    ) -> list[research.models.Intent]:
         """Generate probe intents from the requested hardware profile."""
         profile = _load_profile(_profile_path(request.profile))
         if not _as_bool(profile.get("ENABLED", "false")):
@@ -68,7 +68,7 @@ class QwenVlAdapter:
                 "MODEL_MAX_LENGTH": max_length,
             }
             intents.append(
-                models.Intent(
+                research.models.Intent(
                     adapter=self.name,
                     model=request.model,
                     profile=request.profile,
@@ -82,8 +82,8 @@ class QwenVlAdapter:
         return intents
 
     def preflight(
-        self, intent: models.Intent, context: models.TrialContext
-    ) -> models.PreflightResult:
+        self, intent: research.models.Intent, context: research.models.TrialContext
+    ) -> research.models.PreflightResult:
         """Check that the Qwen-VL launcher needed for the trial exists."""
         launcher = _launcher_path(context)
         ok = launcher.exists()
@@ -91,15 +91,15 @@ class QwenVlAdapter:
             "launcher": "ok" if ok else "missing",
             "launcher_path": str(launcher),
         }
-        return models.PreflightResult(
+        return research.models.PreflightResult(
             ok=ok,
             checks=checks,
             message="ok" if ok else f"missing launcher: {launcher}",
         )
 
     def build_trial(
-        self, intent: models.Intent, context: models.TrialContext
-    ) -> models.TrialCommand:
+        self, intent: research.models.Intent, context: research.models.TrialContext
+    ) -> research.models.TrialCommand:
         """Build the shell command and environment for one Qwen-VL trial."""
         output_dir = (
             context.artifact_dir
@@ -111,13 +111,15 @@ class QwenVlAdapter:
         env["MODEL_NAME_OR_PATH"] = intent.model
         env["OUTPUT_DIR"] = str(output_dir)
         env["RUN_NAME"] = intent.name
-        return models.TrialCommand(
+        return research.models.TrialCommand(
             argv=["bash", str(_launcher_path(context))],
             env=env,
             cwd=context.worktree,
         )
 
-    def parse_progress(self, event_or_log_line: str) -> models.ProgressUpdate | None:
+    def parse_progress(
+        self, event_or_log_line: str
+    ) -> research.models.ProgressUpdate | None:
         """Parse simple metric lines from Qwen-VL trial logs."""
         line = event_or_log_line.strip()
         if ":" not in line:
@@ -129,13 +131,15 @@ class QwenVlAdapter:
             value = float(raw_value.strip())
         except ValueError:
             return None
-        return models.ProgressUpdate(metrics={key: value}, message=line)
+        return research.models.ProgressUpdate(metrics={key: value}, message=line)
 
-    def analyze_result(self, context: models.TrialContext) -> models.TrialReport:
+    def analyze_result(
+        self, context: research.models.TrialContext
+    ) -> research.models.TrialReport:
         """Summarize a Qwen-VL trial from its captured run log."""
         log_path = context.artifact_dir / "run.log"
         if not log_path.exists():
-            return models.TrialReport(
+            return research.models.TrialReport(
                 status="failed",
                 failure={"reason": "missing_run_log"},
                 summary="Qwen-VL trial failed: missing run.log",
@@ -150,7 +154,7 @@ class QwenVlAdapter:
 
         status = "succeeded" if "val_loss" in metrics or "DRY_RUN" in text else "failed"
         failure = {} if status == "succeeded" else {"reason": "missing_metrics"}
-        return models.TrialReport(
+        return research.models.TrialReport(
             status=status,
             metrics=metrics,
             failure=failure,
@@ -164,7 +168,7 @@ def _profile_path(profile: str) -> pathlib.Path:
     return pathlib.Path(__file__).with_name("profiles") / f"{profile}.env"
 
 
-def _launcher_path(context: models.TrialContext) -> pathlib.Path:
+def _launcher_path(context: research.models.TrialContext) -> pathlib.Path:
     return context.worktree / "scripts" / "sft_qwen3_8b.sh"
 
 

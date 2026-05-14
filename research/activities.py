@@ -8,7 +8,6 @@ import traceback
 
 import temporalio.activity
 
-import research.adapters
 import research.artifacts
 import research.db
 import research.models
@@ -66,7 +65,21 @@ def run_trial_activity(
     experiment_id: int,
     attempt: int = 1,
 ) -> dict[str, object]:
-    """Run one trial attempt and persist its terminal report state."""
+    """Reject generic trial execution without a concrete adapter wrapper."""
+    raise RuntimeError(
+        "Generic run_trial_activity has no adapter loader. Register an "
+        "experiment-specific Temporal activity that calls run_trial_with_adapter()."
+    )
+
+
+def run_trial_with_adapter(
+    db_path_s: str,
+    experiment_id: int,
+    adapter: research.models.ExperimentAdapter,
+    attempt: int = 1,
+    worktree: pathlib.Path | None = None,
+) -> dict[str, object]:
+    """Run one trial attempt with a concrete adapter and persist terminal state."""
     db_path = pathlib.Path(db_path_s)
     experiment = research.db.get_experiment(db_path, experiment_id)
     intent = _intent_from_row(
@@ -75,7 +88,7 @@ def run_trial_activity(
     artifact_root = pathlib.Path(str(experiment["artifact_root"]))
     artifact_dir = research.artifacts.attempt_dir(
         artifact_root,
-        adapter="adapter-load-failed",
+        adapter=adapter.name,
         experiment_id=experiment_id,
         attempt=attempt,
     )
@@ -87,7 +100,6 @@ def run_trial_activity(
 
     research.db.transition_experiment(db_path, experiment_id, "running")
     try:
-        adapter = research.adapters.load_adapter(str(experiment["adapter"]))
         artifact_dir = research.artifacts.attempt_dir(
             artifact_root,
             adapter=adapter.name,
@@ -98,7 +110,7 @@ def run_trial_activity(
             experiment_id=experiment_id,
             trial_run_id=trial_run_id,
             attempt=attempt,
-            worktree=pathlib.Path.cwd(),
+            worktree=worktree or pathlib.Path.cwd(),
             artifact_dir=artifact_dir,
             db_path=db_path,
         )

@@ -11,9 +11,7 @@ from datetime import timedelta
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-
-with workflow.unsafe.imports_passed_through():
-    from research.activities import run_trial_activity
+import research.activities
 
 
 @workflow.defn
@@ -46,7 +44,7 @@ class TrialWorkflow:
         self.phase = "running"
         self.experiment_id = experiment_id
         self.latest_result = await workflow.execute_activity(
-            run_trial_activity,
+            research.activities.run_trial_activity,
             args=[db_path, experiment_id, attempt],
             start_to_close_timeout=timedelta(hours=12),
             retry_policy=RetryPolicy(maximum_attempts=1),

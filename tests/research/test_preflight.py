@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pathlib
 
-import research.adapters
 import research.models
 import research.preflight
+import tests.research.fake_adapter
 
 
 class MaskingAdapter:
@@ -25,9 +25,7 @@ class MaskingAdapter:
 def test_run_preflight_combines_generic_and_adapter_checks(
     tmp_path: pathlib.Path,
 ) -> None:
-    adapter = research.adapters.load_adapter(
-        "tests.research.fake_adapter:FakeAdapter"
-    )
+    adapter = tests.research.fake_adapter.FakeAdapter()
     db_path = tmp_path / "research.sqlite"
     db_path.write_text("", encoding="utf-8")
     context = research.models.TrialContext(

@@ -202,9 +202,7 @@ def get_trial_run(db_path: pathlib.Path, trial_run_id: int) -> JsonDict:
     return _row(row)
 
 
-def create_trial_run(
-    db_path: pathlib.Path, *, experiment_id: int, attempt: int
-) -> int:
+def create_trial_run(db_path: pathlib.Path, *, experiment_id: int, attempt: int) -> int:
     """Create a preflight trial_run row and return its id."""
     with contextlib.closing(connect(db_path)) as conn:
         cur = conn.execute(
@@ -284,9 +282,7 @@ def transition_trial_run(
     report_path: str = "",
 ) -> None:
     """Update a trial run's status, metrics, and optional report path."""
-    finished_at = (
-        utc_now() if status in {"succeeded", "failed", "cancelled"} else None
-    )
+    finished_at = utc_now() if status in {"succeeded", "failed", "cancelled"} else None
     with contextlib.closing(connect(db_path)) as conn:
         cur = conn.execute(
             """
