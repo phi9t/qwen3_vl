@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import codecs
 import dataclasses
 import os
 import pathlib
+import selectors
 import signal
 import subprocess
+import typing
 
 import research.models
 
 
 _TERMINATE_TIMEOUT_SECONDS = 10
+_STDOUT_POLL_SECONDS = 0.1
 
 
 @dataclasses.dataclass(frozen=True)
@@ -25,18 +29,85 @@ class TrialRunResult:
     )
 
 
-def terminate_process_group(proc: subprocess.Popen[str]) -> None:
+def terminate_process_group(proc: subprocess.Popen[bytes]) -> None:
     """Terminates a trial process group."""
+    process_group_id = os.getpgid(proc.pid)
+    _terminate_process_group_id(process_group_id)
     if proc.poll() is not None:
         return
-
-    process_group_id = os.getpgid(proc.pid)
-    os.killpg(process_group_id, signal.SIGTERM)
     try:
         proc.wait(timeout=_TERMINATE_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        os.killpg(process_group_id, signal.SIGKILL)
+        _terminate_process_group_id(process_group_id, signal.SIGKILL)
         proc.wait(timeout=_TERMINATE_TIMEOUT_SECONDS)
+
+
+def _terminate_process_group_id(
+    process_group_id: int,
+    sig: signal.Signals = signal.SIGTERM,
+) -> None:
+    try:
+        os.killpg(process_group_id, sig)
+    except ProcessLookupError:
+        return
+
+
+def _capture_output(
+    proc: subprocess.Popen[bytes],
+    adapter: research.models.ExperimentAdapter,
+    log_file: typing.TextIO,
+) -> list[research.models.ProgressUpdate]:
+    if proc.stdout is None:
+        raise RuntimeError("Trial subprocess stdout was not captured.")
+
+    progress: list[research.models.ProgressUpdate] = []
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    pending = ""
+    file_descriptor = proc.stdout.fileno()
+
+    def process_text(text: str) -> None:
+        nonlocal pending
+        pending += text
+        while "\n" in pending:
+            line, pending = pending.split("\n", 1)
+            _record_line(adapter, log_file, progress, f"{line}\n")
+
+    try:
+        while True:
+            for _key, _mask in selector.select(_STDOUT_POLL_SECONDS):
+                chunk = os.read(file_descriptor, 8192)
+                if chunk:
+                    process_text(decoder.decode(chunk))
+            if proc.poll() is not None:
+                while selector.select(0):
+                    chunk = os.read(file_descriptor, 8192)
+                    if not chunk:
+                        break
+                    process_text(decoder.decode(chunk))
+                remaining = pending + decoder.decode(b"", final=True)
+                if remaining:
+                    _record_line(adapter, log_file, progress, remaining)
+                break
+    finally:
+        selector.unregister(proc.stdout)
+        selector.close()
+        proc.stdout.close()
+    return progress
+
+
+def _record_line(
+    adapter: research.models.ExperimentAdapter,
+    log_file: typing.TextIO,
+    progress: list[research.models.ProgressUpdate],
+    line: str,
+) -> None:
+    log_file.write(line)
+    log_file.flush()
+    update = adapter.parse_progress(line)
+    if update is not None:
+        progress.append(update)
 
 
 def run_trial_command(
@@ -50,7 +121,6 @@ def run_trial_command(
     environment = dict(os.environ)
     environment.update(command.env)
     cwd = command.cwd or context.worktree
-    progress: list[research.models.ProgressUpdate] = []
 
     proc = subprocess.Popen(
         command.argv,
@@ -58,20 +128,14 @@ def run_trial_command(
         env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
         start_new_session=True,
     )
+    process_group_id = os.getpgid(proc.pid)
     try:
         with log_path.open("w", encoding="utf-8") as log_file:
-            if proc.stdout is None:
-                raise RuntimeError("Trial subprocess stdout was not captured.")
-            for line in proc.stdout:
-                log_file.write(line)
-                log_file.flush()
-                update = adapter.parse_progress(line)
-                if update is not None:
-                    progress.append(update)
+            progress = _capture_output(proc, adapter, log_file)
         returncode = proc.wait()
+        _terminate_process_group_id(process_group_id)
     except BaseException:
         terminate_process_group(proc)
         raise
