@@ -72,10 +72,10 @@ def run_trial_activity(
     intent = _intent_from_row(
         research.db.get_intent(db_path, int(experiment["intent_id"]))
     )
-    adapter = research.adapters.load_adapter(str(experiment["adapter"]))
+    artifact_root = pathlib.Path(str(experiment["artifact_root"]))
     artifact_dir = research.artifacts.attempt_dir(
-        pathlib.Path(str(experiment["artifact_root"])),
-        adapter=adapter.name,
+        artifact_root,
+        adapter="adapter-load-failed",
         experiment_id=experiment_id,
         attempt=attempt,
     )
@@ -84,17 +84,24 @@ def run_trial_activity(
         experiment_id=experiment_id,
         attempt=attempt,
     )
-    context = research.models.TrialContext(
-        experiment_id=experiment_id,
-        trial_run_id=trial_run_id,
-        attempt=attempt,
-        worktree=pathlib.Path.cwd(),
-        artifact_dir=artifact_dir,
-        db_path=db_path,
-    )
 
     research.db.transition_experiment(db_path, experiment_id, "running")
     try:
+        adapter = research.adapters.load_adapter(str(experiment["adapter"]))
+        artifact_dir = research.artifacts.attempt_dir(
+            artifact_root,
+            adapter=adapter.name,
+            experiment_id=experiment_id,
+            attempt=attempt,
+        )
+        context = research.models.TrialContext(
+            experiment_id=experiment_id,
+            trial_run_id=trial_run_id,
+            attempt=attempt,
+            worktree=pathlib.Path.cwd(),
+            artifact_dir=artifact_dir,
+            db_path=db_path,
+        )
         preflight = research.preflight.run_preflight(adapter, intent, context)
         _write_preflight(artifact_dir, preflight)
 

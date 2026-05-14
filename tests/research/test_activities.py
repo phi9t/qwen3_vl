@@ -193,3 +193,26 @@ def test_run_trial_activity_persists_adapter_exception(
     assert trial_run["status"] == "failed"
     assert trial_run["failure_json"]["reason"] == "activity_exception"
     assert (artifact_dir / "report.md").exists()
+
+
+def test_run_trial_activity_persists_adapter_load_failure(
+    tmp_path: pathlib.Path,
+) -> None:
+    db_path, artifact_root, _intent_id, experiment_id = _create_experiment(
+        tmp_path,
+        "tests.research.test_activities:MissingAdapter",
+    )
+
+    result = research.activities.run_trial_activity(str(db_path), experiment_id, 1)
+
+    artifact_dir = (
+        artifact_root / "adapter-load-failed" / str(experiment_id) / "attempt-1"
+    )
+    trial_run = research.db.get_trial_run(db_path, 1)
+    assert result["status"] == "failed"
+    assert result["failure"]["reason"] == "activity_exception"
+    assert "MissingAdapter" in result["failure"]["message"]
+    assert research.db.get_experiment(db_path, experiment_id)["status"] == "failed"
+    assert trial_run["status"] == "failed"
+    assert trial_run["failure_json"]["reason"] == "activity_exception"
+    assert (artifact_dir / "report.md").exists()
