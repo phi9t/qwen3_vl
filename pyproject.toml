@@ -7,7 +7,14 @@ name = "qwen3-vl-research"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
+    "tomli>=2.0",
     "temporalio>=1.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+    "ruff>=0.15",
 ]
 
 [project.scripts]
