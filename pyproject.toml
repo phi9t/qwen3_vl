@@ -1,3 +1,21 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qwen3-vl-research"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "temporalio>=1.7",
+]
+
+[project.scripts]
+research = "research.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["research"]
+
 [tool.ruff]
 line-length = 88
 # Target Python 3.10+ (uses X | None union syntax, built-in generics, StrEnum)
