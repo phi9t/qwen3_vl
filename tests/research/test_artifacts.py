@@ -36,6 +36,20 @@ def test_attempt_dir_creates_isolated_directory(tmp_path: pathlib.Path) -> None:
     assert path.exists()
 
 
+@pytest.mark.parametrize("adapter", ["../escape", "/tmp/escape", ".", "..", ""])
+def test_attempt_dir_rejects_unsafe_adapter_segment(
+    tmp_path: pathlib.Path,
+    adapter: str,
+) -> None:
+    with pytest.raises(ValueError, match="single safe path segment"):
+        research.artifacts.attempt_dir(
+            tmp_path / "artifacts",
+            adapter=adapter,
+            experiment_id=7,
+            attempt=2,
+        )
+
+
 def test_relative_artifact_rejects_external_path(tmp_path: pathlib.Path) -> None:
     root = tmp_path / "artifacts"
     inside = root / "fake" / "run.log"

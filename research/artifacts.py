@@ -9,6 +9,13 @@ import pathlib
 ARTIFACT_ROOT_ENV = "RESEARCH_ARTIFACT_ROOT"
 
 
+def _safe_segment(name: str, value: str) -> str:
+    path = pathlib.PurePath(value)
+    if path.is_absolute() or len(path.parts) != 1 or path.name in {"", ".", ".."}:
+        raise ValueError(f"{name} must be a single safe path segment: {value!r}.")
+    return value
+
+
 def default_artifact_root() -> pathlib.Path:
     """Return the configured or default research artifact root."""
     configured = os.environ.get(ARTIFACT_ROOT_ENV)
@@ -25,7 +32,8 @@ def attempt_dir(
     attempt: int,
 ) -> pathlib.Path:
     """Create and return an isolated artifact directory for one attempt."""
-    path = root / adapter / str(experiment_id) / f"attempt-{attempt}"
+    adapter_segment = _safe_segment("adapter", adapter)
+    path = root / adapter_segment / str(experiment_id) / f"attempt-{attempt}"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
