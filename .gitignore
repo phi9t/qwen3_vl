@@ -1,5 +1,7 @@
 .autonomy/worktrees/
 .autonomy/runs/*/artifacts/
+.research/
+.artifacts/
 
 # Python
 __pycache__/

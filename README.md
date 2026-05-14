@@ -20,6 +20,20 @@ This generation delivers comprehensive upgrades across the board: superior text 
 
 Available in Dense and MoE architectures that scale from edge to cloud, with Instruct and reasoning‑enhanced Thinking editions for flexible, on‑demand deployment.
 
+## Scientific Experiment Methodology
+
+This repository uses the top-level `research/` package for scientific
+experiment orchestration. Use `mise` tasks for routine operation:
+
+```bash
+mise run research-db-init
+mise run qwen-probe-b200
+mise run research-status
+```
+
+Qwen-VL-specific experiment behavior lives under
+`qwen-vl-finetune/experiments/`.
+
 
 #### Key Enhancements:
 
