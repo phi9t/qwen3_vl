@@ -6,8 +6,6 @@ import json
 import pathlib
 import traceback
 
-import temporalio.activity
-
 import research.artifacts
 import research.db
 import research.models
@@ -56,19 +54,6 @@ def _failed_report(reason: str, message: str) -> research.models.TrialReport:
         metrics={},
         failure={"reason": reason, "message": message},
         summary=message,
-    )
-
-
-@temporalio.activity.defn
-def run_trial_activity(
-    db_path_s: str,
-    experiment_id: int,
-    attempt: int = 1,
-) -> dict[str, object]:
-    """Reject generic trial execution without a concrete adapter wrapper."""
-    raise RuntimeError(
-        "Generic run_trial_activity has no adapter loader. Register an "
-        "experiment-specific Temporal activity that calls run_trial_with_adapter()."
     )
 
 

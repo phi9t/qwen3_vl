@@ -48,10 +48,12 @@ def test_qwen_worker_config_uses_qwen_activity_and_workflows() -> None:
     config = experiments.qwen_experiments.build_worker_config(
         address="localhost:7233",
         task_queue="research-local",
+        activity_workers=2,
     )
 
     assert config["address"] == "localhost:7233"
     assert config["task_queue"] == "research-local"
+    assert config["activity_workers"] == 2
     assert _names(config["workflows"]) == ["QwenProbeWorkflow", "QwenTrialWorkflow"]
     assert _names(config["activities"]) == ["qwen_run_trial_activity"]
 

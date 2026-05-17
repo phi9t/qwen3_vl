@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 
 import research.models
+
+
+def _uv_available() -> bool:
+    configured = os.environ.get("UV")
+    if configured:
+        return shutil.which(configured) is not None or os.path.exists(configured)
+    return shutil.which("uv") is not None
 
 
 def run_preflight(
@@ -24,7 +32,7 @@ def run_preflight(
     """
     generic_checks: dict[str, object] = {
         "adapter": adapter.name,
-        "uv": "ok" if shutil.which("uv") else "missing",
+        "uv": "ok" if _uv_available() else "missing",
         "db": "ok" if context.db_path.exists() else "missing",
     }
     try:

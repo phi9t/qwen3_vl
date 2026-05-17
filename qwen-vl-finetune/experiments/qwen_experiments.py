@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import contextlib
 import pathlib
 
@@ -41,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--task-queue",
         default=research.temporal.DEFAULT_TASK_QUEUE,
     )
+    manager_parser.add_argument("--activity-workers", default=1, type=int)
 
     subparsers.add_parser("status")
     return parser
@@ -77,11 +79,18 @@ def command_status(db_path: pathlib.Path) -> int:
     return 0
 
 
-def build_worker_config(address: str, task_queue: str) -> dict[str, object]:
+def build_worker_config(
+    address: str,
+    task_queue: str,
+    activity_workers: int = 1,
+) -> dict[str, object]:
     """Build the Qwen Temporal worker registration config."""
+    if activity_workers < 1:
+        raise ValueError("activity_workers must be at least 1.")
     return {
         "address": address,
         "task_queue": task_queue,
+        "activity_workers": activity_workers,
         "workflows": [
             experiments.qwen_workflows.QwenProbeWorkflow,
             experiments.qwen_workflows.QwenTrialWorkflow,
@@ -90,17 +99,25 @@ def build_worker_config(address: str, task_queue: str) -> dict[str, object]:
     }
 
 
-async def run_manager(address: str, task_queue: str) -> None:
+async def run_manager(
+    address: str,
+    task_queue: str,
+    activity_workers: int = 1,
+) -> None:
     """Run the Qwen-VL Temporal worker."""
-    config = build_worker_config(address, task_queue)
+    config = build_worker_config(address, task_queue, activity_workers)
     client = await temporalio.client.Client.connect(str(config["address"]))
-    worker = temporalio.worker.Worker(
-        client,
-        task_queue=str(config["task_queue"]),
-        workflows=list(config["workflows"]),
-        activities=list(config["activities"]),
-    )
-    await worker.run()
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=int(config["activity_workers"])
+    ) as executor:
+        worker = temporalio.worker.Worker(
+            client,
+            task_queue=str(config["task_queue"]),
+            workflows=list(config["workflows"]),
+            activities=list(config["activities"]),
+            activity_executor=executor,
+        )
+        await worker.run()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -114,7 +131,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         return command_status(db_path)
     if args.command == "manager":
-        asyncio.run(run_manager(args.address, args.task_queue))
+        asyncio.run(
+            run_manager(
+                args.address,
+                args.task_queue,
+                args.activity_workers,
+            )
+        )
         return 0
     raise AssertionError(args.command)
 
