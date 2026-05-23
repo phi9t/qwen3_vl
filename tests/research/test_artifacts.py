@@ -36,6 +36,20 @@ def test_attempt_dir_creates_isolated_directory(tmp_path: pathlib.Path) -> None:
     assert path.exists()
 
 
+def test_attempt_dir_from_subdir_creates_stored_artifact_path(
+    tmp_path: pathlib.Path,
+) -> None:
+    root = tmp_path / "artifacts"
+    path = research.artifacts.attempt_dir_from_subdir(
+        root,
+        artifact_subdir="fake/7",
+        attempt=2,
+    )
+
+    assert path == root / "fake" / "7" / "attempt-2"
+    assert path.exists()
+
+
 @pytest.mark.parametrize("adapter", ["../escape", "/tmp/escape", ".", "..", ""])
 def test_attempt_dir_rejects_unsafe_adapter_segment(
     tmp_path: pathlib.Path,
@@ -46,6 +60,19 @@ def test_attempt_dir_rejects_unsafe_adapter_segment(
             tmp_path / "artifacts",
             adapter=adapter,
             experiment_id=7,
+            attempt=2,
+        )
+
+
+@pytest.mark.parametrize("artifact_subdir", ["../escape", "/tmp/escape", ".", "..", ""])
+def test_attempt_dir_from_subdir_rejects_unsafe_relative_path(
+    tmp_path: pathlib.Path,
+    artifact_subdir: str,
+) -> None:
+    with pytest.raises(ValueError, match="safe relative path"):
+        research.artifacts.attempt_dir_from_subdir(
+            tmp_path / "artifacts",
+            artifact_subdir=artifact_subdir,
             attempt=2,
         )
 

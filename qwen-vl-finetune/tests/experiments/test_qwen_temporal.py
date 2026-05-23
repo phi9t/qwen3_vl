@@ -5,6 +5,8 @@ from __future__ import annotations
 import pathlib
 
 import experiments.qwen_temporal
+import pytest
+import temporalio.exceptions
 
 import research.db
 import research.models
@@ -61,6 +63,21 @@ class TemporalFakeQwenAdapter:
         )
 
 
+class FailingTemporalFakeQwenAdapter(TemporalFakeQwenAdapter):
+    """Adapter that fails during preflight after the activity creates state."""
+
+    def preflight(
+        self,
+        intent: research.models.Intent,
+        context: research.models.TrialContext,
+    ) -> research.models.PreflightResult:
+        return research.models.PreflightResult(
+            ok=False,
+            checks={"qwen": "missing"},
+            message="qwen preflight failed",
+        )
+
+
 def test_qwen_trial_activity_uses_concrete_qwen_adapter(
     monkeypatch,
     tmp_path: pathlib.Path,
@@ -82,6 +99,32 @@ def test_qwen_trial_activity_uses_concrete_qwen_adapter(
     assert result["status"] == "succeeded"
     assert result["metrics"] == {"val_loss": 0.5}
     assert result["failure"] == {}
+
+
+def test_qwen_trial_activity_raises_temporal_failure_after_persisting_failure(
+    monkeypatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Failed Qwen trials should fail the Temporal activity after persistence."""
+    monkeypatch.setattr(
+        experiments.qwen_temporal.experiments.qwen_adapter,
+        "QwenVlAdapter",
+        FailingTemporalFakeQwenAdapter,
+    )
+    db_path, experiment_id = _create_experiment(tmp_path)
+
+    with pytest.raises(temporalio.exceptions.ApplicationError) as exc_info:
+        experiments.qwen_temporal.qwen_run_trial_activity(
+            str(db_path),
+            experiment_id,
+            1,
+        )
+
+    trial_run = research.db.get_trial_run(db_path, 1)
+    assert exc_info.value.type == "qwen_trial_failed"
+    assert research.db.get_experiment(db_path, experiment_id)["status"] == "failed"
+    assert trial_run["status"] == "failed"
+    assert trial_run["failure_json"]["reason"] == "preflight_failed"
 
 
 def _create_experiment(tmp_path: pathlib.Path) -> tuple[pathlib.Path, int]:

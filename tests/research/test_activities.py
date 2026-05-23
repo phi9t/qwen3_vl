@@ -104,7 +104,7 @@ def _create_experiment(
         intent_id=intent_id,
         adapter=adapter,
         artifact_root=str(artifact_root),
-        artifact_subdir="fake/1",
+        artifact_subdir=f"{adapter}/1",
     )
     return db_path, artifact_root, intent_id, experiment_id
 
@@ -125,7 +125,7 @@ def test_run_trial_with_adapter_updates_db_and_writes_report(
         tmp_path,
     )
 
-    artifact_dir = artifact_root / "fake" / str(experiment_id) / "attempt-1"
+    artifact_dir = artifact_root / "fake" / "1" / "attempt-1"
     report_path = artifact_dir / "report.md"
     report_json_path = artifact_dir / "report.json"
     preflight_path = artifact_dir / "preflight.json"
@@ -155,6 +155,11 @@ def test_run_trial_with_adapter_updates_db_and_writes_report(
         "succeeded"
     )
     assert trial_run["status"] == "succeeded"
+    assert trial_run["heartbeat_json"] == {
+        "message": "metric=1.0",
+        "metrics": {"metric": 1.0},
+        "step": 1,
+    }
     assert trial_run["metrics_json"] == {"metric": 1.0}
     assert trial_run["failure_json"] == {}
     assert trial_run["report_path"] == str(report_path)
@@ -176,9 +181,7 @@ def test_run_trial_with_adapter_persists_preflight_failure(
         tmp_path,
     )
 
-    artifact_dir = (
-        artifact_root / "failing_preflight" / str(experiment_id) / "attempt-1"
-    )
+    artifact_dir = artifact_root / "failing_preflight" / "1" / "attempt-1"
     trial_run = research.db.get_trial_run(db_path, 1)
     assert result["status"] == "failed"
     assert result["failure"]["reason"] == "preflight_failed"
@@ -205,7 +208,7 @@ def test_run_trial_with_adapter_persists_adapter_exception(
         tmp_path,
     )
 
-    artifact_dir = artifact_root / "build_error" / str(experiment_id) / "attempt-1"
+    artifact_dir = artifact_root / "build_error" / "1" / "attempt-1"
     trial_run = research.db.get_trial_run(db_path, 1)
     assert result["status"] == "failed"
     assert result["failure"]["reason"] == "activity_exception"

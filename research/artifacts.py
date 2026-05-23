@@ -16,6 +16,17 @@ def _safe_segment(name: str, value: str) -> str:
     return value
 
 
+def _safe_relative_path(name: str, value: str) -> pathlib.PurePath:
+    path = pathlib.PurePath(value)
+    if (
+        path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ValueError(f"{name} must be a safe relative path: {value!r}.")
+    return path
+
+
 def default_artifact_root() -> pathlib.Path:
     """Return the configured or default research artifact root."""
     configured = os.environ.get(ARTIFACT_ROOT_ENV)
@@ -34,6 +45,19 @@ def attempt_dir(
     """Create and return an isolated artifact directory for one attempt."""
     adapter_segment = _safe_segment("adapter", adapter)
     path = root / adapter_segment / str(experiment_id) / f"attempt-{attempt}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def attempt_dir_from_subdir(
+    root: pathlib.Path,
+    *,
+    artifact_subdir: str,
+    attempt: int,
+) -> pathlib.Path:
+    """Create and return an attempt directory under a stored artifact subdir."""
+    subdir = _safe_relative_path("artifact_subdir", artifact_subdir)
+    path = root.joinpath(*subdir.parts) / f"attempt-{attempt}"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

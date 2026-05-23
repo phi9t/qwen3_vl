@@ -5,6 +5,7 @@ from __future__ import annotations
 import pathlib
 
 import temporalio.activity
+import temporalio.exceptions
 
 import experiments.qwen_adapter
 import research.activities
@@ -17,10 +18,18 @@ def qwen_run_trial_activity(
     attempt: int = 1,
 ) -> dict[str, object]:
     """Run a Qwen-VL trial through the generic research trial helper."""
-    return research.activities.run_trial_with_adapter(
+    result = research.activities.run_trial_with_adapter(
         db_path_s,
         experiment_id,
         experiments.qwen_adapter.QwenVlAdapter(),
         attempt,
         pathlib.Path.cwd(),
     )
+    if result["status"] != "succeeded":
+        raise temporalio.exceptions.ApplicationError(
+            f"Qwen-VL trial {experiment_id} failed",
+            result,
+            type="qwen_trial_failed",
+            non_retryable=True,
+        )
+    return result

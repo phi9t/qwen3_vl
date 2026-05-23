@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
 import traceback
@@ -57,6 +58,14 @@ def _failed_report(reason: str, message: str) -> research.models.TrialReport:
     )
 
 
+def _latest_heartbeat(
+    progress: list[research.models.ProgressUpdate],
+) -> research.models.JsonDict:
+    if not progress:
+        return {}
+    return dataclasses.asdict(progress[-1])
+
+
 def run_trial_with_adapter(
     db_path_s: str,
     experiment_id: int,
@@ -71,12 +80,12 @@ def run_trial_with_adapter(
         research.db.get_intent(db_path, int(experiment["intent_id"]))
     )
     artifact_root = pathlib.Path(str(experiment["artifact_root"]))
-    artifact_dir = research.artifacts.attempt_dir(
+    artifact_dir = research.artifacts.attempt_dir_from_subdir(
         artifact_root,
-        adapter=adapter.name,
-        experiment_id=experiment_id,
+        artifact_subdir=str(experiment["artifact_subdir"]),
         attempt=attempt,
     )
+    heartbeat: research.models.JsonDict = {}
     trial_run_id = research.db.create_trial_run(
         db_path,
         experiment_id=experiment_id,
@@ -85,12 +94,6 @@ def run_trial_with_adapter(
 
     research.db.transition_experiment(db_path, experiment_id, "running")
     try:
-        artifact_dir = research.artifacts.attempt_dir(
-            artifact_root,
-            adapter=adapter.name,
-            experiment_id=experiment_id,
-            attempt=attempt,
-        )
         context = research.models.TrialContext(
             experiment_id=experiment_id,
             trial_run_id=trial_run_id,
@@ -116,6 +119,7 @@ def run_trial_with_adapter(
             research.db.transition_trial_run(db_path, trial_run_id, "running")
             command = adapter.build_trial(intent, context)
             run_result = research.runners.run_trial_command(adapter, command, context)
+            heartbeat = _latest_heartbeat(run_result.progress)
             report = adapter.analyze_result(context)
             if run_result.returncode != 0 and report.status == "succeeded":
                 report = research.models.TrialReport(
@@ -153,6 +157,7 @@ def run_trial_with_adapter(
         db_path,
         trial_run_id,
         terminal,
+        heartbeat=heartbeat,
         metrics=report.metrics,
         failure=report.failure,
         report_path=report_path,
