@@ -1,0 +1,5 @@
+{"schema_version": 1, "stage": "trial_started"}
+{"pid": 2341314, "schema_version": 1, "stage": "launcher_started"}
+{"return_code": 127, "schema_version": 1, "stage": "process_exited"}
+{"schema_version": 1, "stage": "analysis_started"}
+{"failure_reason": "launcher_error", "schema_version": 1, "stage": "analysis_finished", "status": "crash"}

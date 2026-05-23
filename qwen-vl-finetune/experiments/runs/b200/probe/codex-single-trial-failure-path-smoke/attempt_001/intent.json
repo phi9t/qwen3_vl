@@ -1,0 +1,1 @@
+{"attempt": 1, "campaign_id": null, "expected_failure_reason": "oom", "phase": "probe", "planned_env": {}, "profile": "b200", "research_intent": "probe trial", "schema_version": 1, "success_criteria": {}, "trial": "codex-single-trial-failure-path-smoke", "trial_id": "b200/probe/codex-single-trial-failure-path-smoke", "workflow_id": null}
