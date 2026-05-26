@@ -27,6 +27,11 @@ class DeepResearchRequest:
         """Return a Temporal payload-safe representation."""
         return dataclasses.asdict(self)
 
+    def __post_init__(self) -> None:
+        _positive_int_field(self.max_subtopics, "max_subtopics")
+        _positive_int_field(self.queries_per_subtopic, "queries_per_subtopic")
+        _positive_int_field(self.max_search_results, "max_search_results")
+
 
 @dataclasses.dataclass(frozen=True)
 class SubtopicPlan:
@@ -132,6 +137,11 @@ def _optional_string(payload: JsonDict, key: str) -> str:
     if not isinstance(value, str):
         raise DeepResearchParseError(f"{key} must be a string")
     return value.strip()
+
+
+def _positive_int_field(value: int, field_name: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive integer")
 
 
 def _string_list(
