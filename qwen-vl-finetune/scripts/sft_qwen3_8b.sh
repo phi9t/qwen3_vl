@@ -4,6 +4,16 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
 
+if [[ "${QWEN_RESEARCH_DRY_RUN:-0}" == "1" || "${QWEN_RESEARCH_DRY_RUN:-}" == "true" ]]; then
+  echo "DRY_RUN: qwen3-vl launcher smoke"
+  if [[ -n "${OUTPUT_DIR:-}" ]]; then
+    mkdir -p "${OUTPUT_DIR}"
+  fi
+  echo "val_loss: 0.0"
+  echo "peak_vram_mb: 0.0"
+  exit 0
+fi
+
 # Activate the spack env that holds torch/transformers/peft/hf_hub (only if not
 # already inside a python env). The prior 4B sweep ran under this env; without
 # it `python` resolves to /usr/local/bin/python which lacks huggingface_hub.

@@ -67,6 +67,8 @@ class QwenVlAdapter:
                 "MAX_PIXELS": max_pixels,
                 "MODEL_MAX_LENGTH": max_length,
             }
+            if _as_bool(str(request.budget.get("dry_run", "false"))):
+                config["QWEN_RESEARCH_DRY_RUN"] = "1"
             intents.append(
                 research.models.Intent(
                     adapter=self.name,
@@ -111,6 +113,7 @@ class QwenVlAdapter:
         env["MODEL_NAME_OR_PATH"] = intent.model
         env["OUTPUT_DIR"] = str(output_dir)
         env["RUN_NAME"] = intent.name
+        env["VIRTUAL_ENV"] = ""
         return research.models.TrialCommand(
             argv=["bash", str(_launcher_path(context))],
             env=env,

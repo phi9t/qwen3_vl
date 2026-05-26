@@ -74,6 +74,7 @@ def test_qwen_build_trial_uses_existing_launcher(
     assert command.argv[-1].endswith("scripts/sft_qwen3_8b.sh")
     assert command.env["MODEL_NAME_OR_PATH"] == "Qwen/Qwen3-VL-8B-Instruct"
     assert command.env["OUTPUT_DIR"].endswith("outputs/1/attempt-1")
+    assert command.env["VIRTUAL_ENV"] == ""
 
 
 def test_qwen_analysis_requires_validation_metric(

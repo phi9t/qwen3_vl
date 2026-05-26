@@ -11,6 +11,11 @@ import experiments.qwen_adapter
 import research.activities
 
 
+def qwen_worktree() -> pathlib.Path:
+    """Return the stable Qwen-VL project root used by worker activities."""
+    return pathlib.Path(__file__).resolve().parents[1]
+
+
 @temporalio.activity.defn
 def qwen_run_trial_activity(
     db_path_s: str,
@@ -23,7 +28,8 @@ def qwen_run_trial_activity(
         experiment_id,
         experiments.qwen_adapter.QwenVlAdapter(),
         attempt,
-        pathlib.Path.cwd(),
+        qwen_worktree(),
+        research.activities.heartbeat_progress,
     )
     if result["status"] != "succeeded":
         raise temporalio.exceptions.ApplicationError(

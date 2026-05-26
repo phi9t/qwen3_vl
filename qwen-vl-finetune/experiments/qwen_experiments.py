@@ -4,25 +4,28 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import concurrent.futures
 import contextlib
+import json
 import pathlib
-
-import temporalio.client
-import temporalio.worker
 
 import experiments.qwen_adapter
 import experiments.qwen_temporal
-import experiments.qwen_workflows
 import research.artifacts
 import research.db
 import research.models
 import research.probes
 import research.temporal
+import research.workflows
 
 
 DEFAULT_DB = pathlib.Path(".research") / "research.sqlite"
 DEFAULT_MODEL = "Qwen/Qwen3-VL-8B-Instruct"
+QWEN_TRIAL_ACTIVITY = "qwen_run_trial_activity"
+DEFAULT_PROBE_OBJECTIVE = {
+    "metric": "val_loss",
+    "direction": "minimize",
+    "top_k": 1,
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,6 +38,17 @@ def build_parser() -> argparse.ArgumentParser:
     probe_parser.add_argument("--model", required=True)
     probe_parser.add_argument("--profile", required=True)
     probe_parser.add_argument("--artifact-root", default="")
+    probe_parser.add_argument("--address", default=research.temporal.DEFAULT_ADDRESS)
+    probe_parser.add_argument(
+        "--task-queue",
+        default=research.temporal.DEFAULT_TASK_QUEUE,
+    )
+    probe_parser.add_argument("--workflow-id", default="")
+    probe_parser.add_argument("--plan-only", action="store_true")
+    probe_parser.add_argument("--dry-run", action="store_true")
+    probe_parser.add_argument("--max-experiments", default=0, type=int)
+    probe_parser.add_argument("--wait", action="store_true")
+    probe_parser.add_argument("--timeout-seconds", default=0.0, type=float)
 
     manager_parser = subparsers.add_parser("manager")
     manager_parser.add_argument("--address", default=research.temporal.DEFAULT_ADDRESS)
@@ -44,11 +58,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     manager_parser.add_argument("--activity-workers", default=1, type=int)
 
+    run_trial_parser = subparsers.add_parser("run-trial")
+    run_trial_parser.add_argument("experiment_id", type=int)
+    run_trial_parser.add_argument("--attempt", default=1, type=int)
+    run_trial_parser.add_argument(
+        "--address", default=research.temporal.DEFAULT_ADDRESS
+    )
+    run_trial_parser.add_argument(
+        "--task-queue",
+        default=research.temporal.DEFAULT_TASK_QUEUE,
+    )
+    run_trial_parser.add_argument("--workflow-id", default="")
+
     subparsers.add_parser("status")
     return parser
 
 
-def command_probe(args: argparse.Namespace, db_path: pathlib.Path) -> int:
+def create_probe_plan(
+    args: argparse.Namespace,
+    db_path: pathlib.Path,
+) -> research.probes.ProbeCreationResult:
     """Create Qwen-VL probe experiments using the generic research helper."""
     adapter = experiments.qwen_adapter.QwenVlAdapter()
     artifact_root = (
@@ -56,17 +85,69 @@ def command_probe(args: argparse.Namespace, db_path: pathlib.Path) -> int:
         if args.artifact_root
         else research.artifacts.default_artifact_root()
     )
+    if args.max_experiments < 0:
+        raise ValueError("--max-experiments must be non-negative")
     result = research.probes.create_probe_experiments(
         db_path,
         adapter=adapter,
         request=research.models.ProbeRequest(
             model=args.model,
             profile=args.profile,
+            objective=DEFAULT_PROBE_OBJECTIVE,
+            budget={"dry_run": args.dry_run},
         ),
         artifact_root=artifact_root,
         adapter_ref=adapter.name,
+        max_experiments=args.max_experiments,
     )
+    return result
+
+
+async def command_probe(args: argparse.Namespace, db_path: pathlib.Path) -> int:
+    """Create Qwen-VL probe experiments and start the Temporal probe workflow."""
+    result = create_probe_plan(args, db_path)
     print(f"Created {len(result.experiment_ids)} experiments")
+    if args.plan_only or not result.experiment_ids:
+        if not result.experiment_ids:
+            print("No experiments to submit")
+        return 0
+    workflow_id = args.workflow_id or research.temporal.make_probe_workflow_id(
+        "qwen-probe"
+    )
+    try:
+        workflow_id = await research.temporal.start_probe_workflow(
+            address=args.address,
+            task_queue=args.task_queue,
+            db_path=db_path,
+            experiment_ids=result.experiment_ids,
+            trial_activity=QWEN_TRIAL_ACTIVITY,
+            workflow_id=workflow_id,
+            objective=DEFAULT_PROBE_OBJECTIVE,
+        )
+    except Exception:
+        for experiment_id in result.experiment_ids:
+            research.db.transition_experiment(
+                db_path,
+                experiment_id,
+                "submission_failed",
+            )
+        raise
+    for experiment_id in result.experiment_ids:
+        research.db.transition_experiment(
+            db_path,
+            experiment_id,
+            "submitted",
+            workflow_id=research.workflows.trial_workflow_id(experiment_id, 1),
+        )
+    print(f"Started Temporal workflow {workflow_id}")
+    if args.wait:
+        workflow_result = await research.temporal.wait_for_workflow_result(
+            address=args.address,
+            workflow_id=workflow_id,
+            timeout_seconds=args.timeout_seconds,
+        )
+        print(f"Workflow {workflow_id} completed")
+        print(json.dumps(workflow_result, indent=2, sort_keys=True))
     return 0
 
 
@@ -83,20 +164,14 @@ def build_worker_config(
     address: str,
     task_queue: str,
     activity_workers: int = 1,
-) -> dict[str, object]:
+) -> research.temporal.WorkerConfig:
     """Build the Qwen Temporal worker registration config."""
-    if activity_workers < 1:
-        raise ValueError("activity_workers must be at least 1.")
-    return {
-        "address": address,
-        "task_queue": task_queue,
-        "activity_workers": activity_workers,
-        "workflows": [
-            experiments.qwen_workflows.QwenProbeWorkflow,
-            experiments.qwen_workflows.QwenTrialWorkflow,
-        ],
-        "activities": [experiments.qwen_temporal.qwen_run_trial_activity],
-    }
+    return research.temporal.build_worker_config(
+        address=address,
+        task_queue=task_queue,
+        activities=[experiments.qwen_temporal.qwen_run_trial_activity],
+        activity_workers=activity_workers,
+    )
 
 
 async def run_manager(
@@ -106,18 +181,40 @@ async def run_manager(
 ) -> None:
     """Run the Qwen-VL Temporal worker."""
     config = build_worker_config(address, task_queue, activity_workers)
-    client = await temporalio.client.Client.connect(str(config["address"]))
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=int(config["activity_workers"])
-    ) as executor:
-        worker = temporalio.worker.Worker(
-            client,
-            task_queue=str(config["task_queue"]),
-            workflows=list(config["workflows"]),
-            activities=list(config["activities"]),
-            activity_executor=executor,
+    await research.temporal.run_worker(config)
+
+
+async def command_run_trial(args: argparse.Namespace, db_path: pathlib.Path) -> int:
+    """Start one Qwen-VL experiment as a Temporal trial workflow."""
+    workflow_id = args.workflow_id or research.workflows.trial_workflow_id(
+        args.experiment_id,
+        args.attempt,
+    )
+    try:
+        await research.temporal.start_trial_workflow(
+            address=args.address,
+            task_queue=args.task_queue,
+            db_path=db_path,
+            experiment_id=args.experiment_id,
+            trial_activity=QWEN_TRIAL_ACTIVITY,
+            workflow_id=workflow_id,
+            attempt=args.attempt,
         )
-        await worker.run()
+    except Exception:
+        research.db.transition_experiment(
+            db_path,
+            args.experiment_id,
+            "submission_failed",
+        )
+        raise
+    research.db.transition_experiment(
+        db_path,
+        args.experiment_id,
+        "submitted",
+        workflow_id=workflow_id,
+    )
+    print(f"Started Temporal workflow {workflow_id}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     db_path = pathlib.Path(args.db)
 
     if args.command == "probe":
-        return command_probe(args, db_path)
+        return asyncio.run(command_probe(args, db_path))
     if args.command == "status":
         return command_status(db_path)
     if args.command == "manager":
@@ -139,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+    if args.command == "run-trial":
+        return asyncio.run(command_run_trial(args, db_path))
     raise AssertionError(args.command)
 
 
