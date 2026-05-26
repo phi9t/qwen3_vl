@@ -127,9 +127,36 @@ def test_synthesize_report_with_coco_wraps_markdown(
     )
 
     assert result["topic"] == "Temporal"
-    assert result["markdown"] == "Topic Report\n\nThis is the report body"
+    assert result["markdown"] == "# Topic Report\n\nThis is the report body"
     assert result["successful_queries"] == ["query-1", "query-2"]
     assert result["failed_queries"] == [{"query": "bad", "error": "timeout"}]
+
+
+def test_synthesize_report_with_coco_empty_markdown_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run_coco(
+        *,
+        prompt: str,
+        phase: str,
+        worktree: str,
+        workspace: object | None,
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(stdout="\n   \n\t")
+
+    monkeypatch.setattr(activities.research.coco_cli, "run_coco", fake_run_coco)
+
+    with pytest.raises(temporalio.exceptions.ApplicationError) as exc_info:
+        activities.synthesize_report_with_coco(
+            {
+                "topic": "Temporal",
+                "research": [{"query": "q", "summary": "s", "sources": []}],
+            }
+        )
+
+    assert exc_info.value.type == "deep_research_empty_report"
+    assert exc_info.value.non_retryable is False
 
 
 def test_parse_failure_raises_application_error(

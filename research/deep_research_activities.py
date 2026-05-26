@@ -1,7 +1,6 @@
 """Temporal activities for COCO-backed deep research phases."""
 
 import json
-import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -127,8 +126,8 @@ def synthesize_report_with_coco(payload: dict[str, Any]) -> dict[str, Any]:
         workspace=workspace,
     )
 
-    markdown = _strip_markdown(result.stdout)
-    if not markdown.strip():
+    markdown = result.stdout.strip()
+    if not markdown:
         raise ApplicationError(
             "synthesis produced empty report markdown",
             type="deep_research_empty_report",
@@ -312,19 +311,3 @@ def _build_synthesize_prompt(topic: str, synth_payload: dict[str, Any]) -> str:
         f"Research payload: {json.dumps(synth_payload)}\n"
         "Return only markdown text (no surrounding explanation)."
     )
-
-
-def _strip_markdown(markdown: str) -> str:
-    """Convert simple markdown to plain text for safe persistence."""
-    stripped = markdown.strip()
-    if not stripped:
-        return ""
-
-    text = re.sub(r"```[\s\S]*?```", "\n", stripped)
-    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)
-    text = re.sub(r"(?m)^\s*[-*+]\s+", "", text)
-    text = re.sub(r"(?m)^\s*\d+\.\s+", "", text)
-    text = re.sub(r"\[(.*?)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"[*_]{1,3}([^*_]+)[*_]{1,3}", r"\1", text)
-    text = text.replace("`", "")
-    return text.strip()
