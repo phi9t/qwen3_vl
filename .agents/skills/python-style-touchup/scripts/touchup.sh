@@ -2,7 +2,7 @@
 # Pre-commit Python style touch-up.
 #
 # Usage:
-#   bash .cursor/skills/python-style-touchup/scripts/touchup.sh [file ...]
+#   bash .agents/skills/python-style-touchup/scripts/touchup.sh [file ...]
 #
 # With no arguments: operates on staged Python files (git diff --cached).
 # If no staged files are found, falls back to all modified Python files in the
@@ -46,8 +46,8 @@ echo
 
 if ! command -v ruff &>/dev/null; then
     echo "ERROR: ruff not found. Install it:"
-    echo "  pip install ruff"
-    echo "  # or: uv pip install ruff"
+    echo "  uv add --dev ruff"
+    echo "  # or for an existing environment: uv pip install ruff"
     exit 1
 fi
 

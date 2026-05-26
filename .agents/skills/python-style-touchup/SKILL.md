@@ -16,7 +16,7 @@ Run the touch-up script, then review and fix any remaining manual issues.
 Execute the touch-up script against staged files:
 
 ```bash
-bash .cursor/skills/python-style-touchup/scripts/touchup.sh
+bash .agents/skills/python-style-touchup/scripts/touchup.sh
 ```
 
 The script:
