@@ -7,8 +7,14 @@ run = "uv run research status"
 [tasks.research-report]
 run = "uv run research report {{arg(name='id')}}"
 
+[tasks.research-temporal-start]
+run = "uv run research temporal start-dev"
+
 [tasks.qwen-probe-b200]
 run = "PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments probe --model Qwen/Qwen3-VL-8B-Instruct --profile b200"
+
+[tasks.qwen-probe-b200-dry-run]
+run = "PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments probe --model Qwen/Qwen3-VL-8B-Instruct --profile b200 --dry-run --max-experiments 2"
 
 [tasks.qwen-manager]
 run = "PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments manager"

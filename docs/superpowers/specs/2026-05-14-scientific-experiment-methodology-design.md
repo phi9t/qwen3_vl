@@ -22,12 +22,19 @@ Build one repo-level methodology for conducting scientific experiments. The
 methodology should be generic. Qwen-VL fine-tuning should consume it through a
 domain adapter instead of owning a separate orchestration framework.
 
-The system has two high-level workflows:
+The system has two high-level Temporal workflows plus a submission step:
 
-- `ProbeWorkflow`: generate candidate training intent configs, run them one by
-  one, collect results, and mark the best intents as selected.
+- Probe submission: a concrete adapter generates candidate training intent
+  configs, persists them as queued experiments, and starts a probe workflow.
+- `ProbeWorkflow`: run queued experiments one by one as trial child workflows,
+  collect results, and call a selection activity that marks the best intents as
+  selected.
 - `TrialWorkflow`: run one experiment trial from an intent, including preflight,
   execution, heartbeat progress, analysis, and report generation.
+
+Adapter calls, SQLite writes, subprocesses, log parsing, and report rendering
+stay out of workflow code. They happen in activities or in the explicit
+submission step so Temporal workflow replay remains deterministic.
 
 ## Architecture
 
@@ -35,10 +42,11 @@ Create one top-level package:
 
 ```text
 research/
+  models.py
   db.py
   workflows.py
   activities.py
-  manager.py
+  probes.py
   runners.py
   preflight.py
   artifacts.py
@@ -155,6 +163,9 @@ experiment: queued -> running -> succeeded | failed | cancelled
 trial_run: preflight -> running -> reporting -> succeeded | failed | cancelled
 ```
 
+During Temporal submission, experiments may also pass through `submitted`; if
+the workflow start request itself fails, they move to `submission_failed`.
+
 SQLite stores compact state and references. Logs, trainer events, checkpoints,
 and reports live under artifact directories and are referenced from the
 database by relative paths. TSV exports are allowed for compatibility but are
@@ -166,16 +177,17 @@ not a source of truth.
 
 `ProbeWorkflow` is a Temporal workflow. It:
 
-1. Calls the adapter to generate candidate intents for a model, profile, and
-   objective.
-2. Inserts those intents into SQLite with status `candidate`.
-3. Creates experiment rows for candidates in probe order.
-4. Starts one `TrialWorkflow` at a time.
-5. Waits for each trial result.
-6. Updates intent scores and statuses from trial reports.
-7. Stops when the probe budget is exhausted or enough passing configs exist.
-8. Marks the best training intent configs as `selected`.
-9. Writes a compact probe report.
+1. Receives a persisted, ordered list of experiment ids from the submission
+   step.
+2. Starts one `TrialWorkflow` child at a time.
+3. Waits for each child trial result before launching the next one.
+4. Records compact in-workflow progress for status queries.
+5. Continues across individual trial failures while counting them.
+6. Calls a probe-selection activity with the objective.
+7. The selection activity reads trial metrics from SQLite, updates intent
+   scores, marks the best training configs as `selected`, rejects completed
+   non-winners, and returns a compact selection summary.
+8. The workflow returns trial outcomes plus the selection summary.
 
 Selection is part of probe. There is no separate generic `select` workflow.
 
@@ -297,11 +309,33 @@ The Python CLI is the semantic API:
 
 ```bash
 uv run research db init
-uv run research probe --adapter qwen_vl --model <model-ref> --profile <profile>
-uv run research manager
+uv run research temporal start-dev
 uv run research status
-uv run research report <experiment-or-probe-id>
+uv run research report selected
+uv run research report <experiment-id>
+PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments probe --model <model-ref> --profile <profile> [--max-experiments N] [--wait --timeout-seconds N]
+PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments probe --model <model-ref> --profile <profile> --dry-run --max-experiments 2 --wait --timeout-seconds 300
+PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments manager
+PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments run-trial <experiment-id>
 ```
+
+The generic `research` CLI owns repo-level database/status/report and local
+Temporal helpers. Until a generic adapter-loading CLI is implemented, Qwen-VL
+owns domain-specific probe submission, worker startup, and single-trial
+submission under `qwen-vl-finetune/experiments/qwen_experiments.py`.
+`research report selected` is the discovery surface for completed probe
+campaigns: it prints selected intent configs and scores. `research report
+<experiment-id>` prints the latest trial metrics and artifact report path for a
+single experiment.
+Qwen probe `--dry-run` creates Temporal-submitted intents that exercise the
+launcher, artifact, DB, reporting, and selection path without resolving models,
+starting `torchrun`, or requiring GPUs. Use it with `--max-experiments` as the
+local operational smoke before launching real training campaigns. Use the same
+`--max-experiments` control for first real-training campaigns so one or two
+trials can prove the environment before the full profile grid is submitted.
+Use `--wait` when you want the submitting process to block until Temporal
+finishes the probe workflow and returns the selection summary; otherwise probe
+submission returns as soon as the workflow has been started.
 
 Use `mise` as the repo-level task runner for routine operation. Top-level
 `mise.toml` should expose thin wrappers:
@@ -310,20 +344,23 @@ Use `mise` as the repo-level task runner for routine operation. Top-level
 [tasks.research-db-init]
 run = "uv run research db init"
 
-[tasks.research-probe]
-run = "uv run research probe --adapter {{arg(name='adapter')}} --model {{arg(name='model')}} --profile {{arg(name='profile')}}"
-
-[tasks.research-manager]
-run = "uv run research manager"
-
 [tasks.research-status]
 run = "uv run research status"
 
 [tasks.research-report]
 run = "uv run research report {{arg(name='id')}}"
 
+[tasks.research-temporal-start]
+run = "uv run research temporal start-dev"
+
 [tasks.qwen-probe-b200]
-run = "uv run research probe --adapter qwen_vl --model Qwen/Qwen3-VL-8B-Instruct --profile b200"
+run = "PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments probe --model Qwen/Qwen3-VL-8B-Instruct --profile b200"
+
+[tasks.qwen-probe-b200-dry-run]
+run = "PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments probe --model Qwen/Qwen3-VL-8B-Instruct --profile b200 --dry-run --max-experiments 2"
+
+[tasks.qwen-manager]
+run = "PYTHONPATH=.:qwen-vl-finetune uv run python -m experiments.qwen_experiments manager"
 ```
 
 Responsibilities:
@@ -335,8 +372,9 @@ Responsibilities:
 - SQLite owns durable experiment state.
 
 Mise tasks must stay thin. They must not duplicate workflow logic, parse
-results, manage trial state, or know Qwen internals beyond convenience
-defaults.
+results, or manage trial state. Qwen-specific mise tasks may know convenience
+defaults such as the B200 profile and default Qwen model because they are only
+wrappers around the Qwen adapter CLI.
 
 ## Migration Plan
 
