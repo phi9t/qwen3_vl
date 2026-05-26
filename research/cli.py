@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import pathlib
+import subprocess
 
 import research.db
+import research.reports
+import research.temporal
 
 
 DEFAULT_DB = pathlib.Path(".research") / "research.sqlite"
@@ -25,7 +28,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("status")
 
     report_parser = subparsers.add_parser("report")
-    report_parser.add_argument("id")
+    report_parser.add_argument("target")
+
+    temporal_parser = subparsers.add_parser("temporal")
+    temporal_subparsers = temporal_parser.add_subparsers(
+        dest="temporal_command",
+        required=True,
+    )
+    temporal_subparsers.add_parser("start-dev")
     return parser
 
 
@@ -42,6 +52,20 @@ def command_status(db_path: pathlib.Path) -> int:
     return 0
 
 
+def command_report(db_path: pathlib.Path, target: str) -> int:
+    """Print a Markdown report for selected intents or one experiment."""
+    research.db.init_db(db_path)
+    if target == "selected":
+        print(research.reports.render_selected_intents_report(db_path))
+        return 0
+    try:
+        experiment_id = int(target)
+    except ValueError as exc:
+        raise SystemExit(f"Unknown report target: {target}") from exc
+    print(research.reports.render_experiment_report(db_path, experiment_id))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the research command-line interface."""
     parser = build_parser()
@@ -55,7 +79,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         return command_status(db_path)
     if args.command == "report":
-        parser.error(f"{args.command} is not implemented in this migration step")
+        return command_report(db_path, args.target)
+    if args.command == "temporal" and args.temporal_command == "start-dev":
+        research.temporal.ensure_temporal_cli()
+        return subprocess.call(research.temporal.build_start_dev_command())
     raise AssertionError(args.command)
 
 

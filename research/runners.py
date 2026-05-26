@@ -10,12 +10,14 @@ import selectors
 import signal
 import subprocess
 import typing
+from collections.abc import Callable
 
 import research.models
 
 
 _TERMINATE_TIMEOUT_SECONDS = 10
 _STDOUT_POLL_SECONDS = 0.1
+ProgressCallback = Callable[[research.models.ProgressUpdate], None]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -56,6 +58,7 @@ def _capture_output(
     proc: subprocess.Popen[bytes],
     adapter: research.models.ExperimentAdapter,
     log_file: typing.TextIO,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[research.models.ProgressUpdate]:
     if proc.stdout is None:
         raise RuntimeError("Trial subprocess stdout was not captured.")
@@ -72,7 +75,13 @@ def _capture_output(
         pending += text
         while "\n" in pending:
             line, pending = pending.split("\n", 1)
-            _record_line(adapter, log_file, progress, f"{line}\n")
+            _record_line(
+                adapter,
+                log_file,
+                progress,
+                f"{line}\n",
+                progress_callback,
+            )
 
     stdout_open = True
     try:
@@ -94,7 +103,7 @@ def _capture_output(
     finally:
         remaining = pending + decoder.decode(b"", final=True)
         if remaining:
-            _record_line(adapter, log_file, progress, remaining)
+            _record_line(adapter, log_file, progress, remaining, progress_callback)
         selector.unregister(proc.stdout)
         selector.close()
         proc.stdout.close()
@@ -106,18 +115,22 @@ def _record_line(
     log_file: typing.TextIO,
     progress: list[research.models.ProgressUpdate],
     line: str,
+    progress_callback: ProgressCallback | None = None,
 ) -> None:
     log_file.write(line)
     log_file.flush()
     update = adapter.parse_progress(line)
     if update is not None:
         progress.append(update)
+        if progress_callback is not None:
+            progress_callback(update)
 
 
 def run_trial_command(
     adapter: research.models.ExperimentAdapter,
     command: research.models.TrialCommand,
     context: research.models.TrialContext,
+    progress_callback: ProgressCallback | None = None,
 ) -> TrialRunResult:
     """Runs a trial command and captures logs and progress updates."""
     context.artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -137,7 +150,7 @@ def run_trial_command(
     process_group_id = os.getpgid(proc.pid)
     try:
         with log_path.open("w", encoding="utf-8") as log_file:
-            progress = _capture_output(proc, adapter, log_file)
+            progress = _capture_output(proc, adapter, log_file, progress_callback)
         returncode = proc.wait()
         _terminate_process_group_id(process_group_id)
     except BaseException:

@@ -202,6 +202,25 @@ def get_trial_run(db_path: pathlib.Path, trial_run_id: int) -> JsonDict:
     return _row(row)
 
 
+def get_latest_trial_run_for_experiment(
+    db_path: pathlib.Path,
+    experiment_id: int,
+) -> JsonDict | None:
+    """Return the newest trial run for an experiment, if one exists."""
+    with contextlib.closing(connect(db_path)) as conn:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM trial_runs
+            WHERE experiment_id = ?
+            ORDER BY attempt DESC, id DESC
+            LIMIT 1
+            """,
+            (experiment_id,),
+        ).fetchone()
+    return None if row is None else _row(row)
+
+
 def create_trial_run(db_path: pathlib.Path, *, experiment_id: int, attempt: int) -> int:
     """Create a preflight trial_run row and return its id."""
     with contextlib.closing(connect(db_path)) as conn:

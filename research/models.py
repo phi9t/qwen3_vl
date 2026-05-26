@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
-from typing import Protocol
+from typing import Any, Protocol
 
 
-JsonDict = dict[str, object]
+JsonDict = dict[str, Any]
 
 
 @dataclasses.dataclass(frozen=True)

@@ -44,6 +44,40 @@ def test_run_trial_command_writes_log_and_progress(
     ).strip() == "metric=1.0"
 
 
+def test_run_trial_command_calls_progress_callback(
+    tmp_path: pathlib.Path,
+) -> None:
+    adapter = tests.research.fake_adapter.FakeAdapter()
+    context = research.models.TrialContext(
+        experiment_id=1,
+        trial_run_id=1,
+        attempt=1,
+        worktree=tmp_path,
+        artifact_dir=tmp_path / "artifacts",
+        db_path=tmp_path / "research.sqlite",
+    )
+    intent = research.models.Intent(
+        "fake",
+        "unit-model",
+        "cpu",
+        "probe",
+        "small",
+        {"batch_size": 1},
+    )
+    command = adapter.build_trial(intent, context)
+    progress = []
+
+    result = research.runners.run_trial_command(
+        adapter,
+        command,
+        context,
+        progress.append,
+    )
+
+    assert result.returncode == 0
+    assert progress[-1].metrics == {"metric": 1.0}
+
+
 def test_run_trial_command_does_not_hang_on_inherited_stdout(
     tmp_path: pathlib.Path,
 ) -> None:
