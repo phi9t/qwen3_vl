@@ -8,4 +8,4 @@ Invoked at the end of every other playbook.
 
 **PRs.** a diff/prose cleanup pass the diff before commit; apply the **unslop** skill to the PR description and commit bodies. Small PRs, 5 narrow over 1 fat; stack follow-ups, branch off main only for genuinely independent work. For stacked PRs, use whatever stacking tool your team uses; the principle is small, ordered slices with the stack visible to reviewers. `gh pr view <number>` before referencing PR status. Rebase on `main` before substantial stack work. No `## Summary` / `## Test plan` boilerplate on small PRs; commit bodies don't restate the subject.
 
-A subagent that opens a PR runs `interrogate` and a diff/prose cleanup pass, returns the URL, and reports results. Return to the parent.
+When PR work is delegated, the helper runs `interrogate` and a diff/prose cleanup pass, returns the URL, and reports results. When no helper is available, run those checks locally before handing back.
