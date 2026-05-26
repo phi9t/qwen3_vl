@@ -103,6 +103,8 @@ def test_search_web_with_coco_parses_result(
 def test_synthesize_report_with_coco_wraps_markdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    markdown = "\n  \n# Topic Report\n\nThis is the report body\n  \n"
+
     def fake_run_coco(
         *,
         prompt: str,
@@ -111,7 +113,7 @@ def test_synthesize_report_with_coco_wraps_markdown(
         workspace: object | None,
         **kwargs: object,
     ) -> SimpleNamespace:
-        return SimpleNamespace(stdout="# Topic Report\n\nThis is the report body")
+        return SimpleNamespace(stdout=markdown)
 
     monkeypatch.setattr(activities.research.coco_cli, "run_coco", fake_run_coco)
 
@@ -127,7 +129,7 @@ def test_synthesize_report_with_coco_wraps_markdown(
     )
 
     assert result["topic"] == "Temporal"
-    assert result["markdown"] == "# Topic Report\n\nThis is the report body"
+    assert result["markdown"] == markdown
     assert result["successful_queries"] == ["query-1", "query-2"]
     assert result["failed_queries"] == [{"query": "bad", "error": "timeout"}]
 

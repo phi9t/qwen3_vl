@@ -126,8 +126,8 @@ def synthesize_report_with_coco(payload: dict[str, Any]) -> dict[str, Any]:
         workspace=workspace,
     )
 
-    markdown = result.stdout.strip()
-    if not markdown:
+    markdown = result.stdout
+    if not markdown.strip():
         raise ApplicationError(
             "synthesis produced empty report markdown",
             type="deep_research_empty_report",
