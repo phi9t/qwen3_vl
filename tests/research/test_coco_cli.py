@@ -48,11 +48,61 @@ def test_build_coco_command_without_workspace() -> None:
 
 def test_resolve_coco_path_environment_override(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
 ) -> None:
-    monkeypatch.setenv("RESEARCH_COCO_BIN", "/opt/bin/coco")
+    path = tmp_path / "coco"
+    path.write_text("#!/bin/sh\necho coco\n", encoding="utf-8")
+    path.chmod(0o755)
+    monkeypatch.setenv("RESEARCH_COCO_BIN", str(path))
     monkeypatch.delenv("PATH", raising=False)
 
-    assert coco_cli.resolve_coco_path() == "/opt/bin/coco"
+    assert coco_cli.resolve_coco_path() == str(path)
+
+
+def test_resolve_coco_path_discovery_failure_with_no_env_and_empty_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RESEARCH_COCO_BIN", raising=False)
+    monkeypatch.setenv("PATH", "")
+
+    with pytest.raises(coco_cli.CocoExecutionError, match="coco executable not found"):
+        coco_cli.resolve_coco_path()
+
+
+def test_resolve_coco_path_invalid_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RESEARCH_COCO_BIN", "/no/such/coco")
+
+    with pytest.raises(
+        coco_cli.CocoExecutionError, match="RESEARCH_COCO_BIN"
+    ) as exc_info:
+        coco_cli.resolve_coco_path()
+
+    assert exc_info.value.phase == "discovery"
+
+
+def test_run_coco_reraises_launch_errors_as_coco_execution_error(
+    tmp_path: pathlib.Path,
+) -> None:
+    def missing_runner(
+        argv: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("binary missing")
+
+    with pytest.raises(coco_cli.CocoExecutionError) as exc_info:
+        coco_cli.run_coco(
+            prompt="Return JSON",
+            phase="search",
+            worktree="deep-research-search",
+            workspace=tmp_path,
+            runner=missing_runner,
+            coco_path="/usr/bin/coco",
+        )
+
+    assert exc_info.value.phase == "search"
+    assert "FileNotFoundError" in str(exc_info.value)
+    assert "binary missing" in str(exc_info.value)
 
 
 def test_run_coco_missing_workspace_fails(tmp_path: pathlib.Path) -> None:

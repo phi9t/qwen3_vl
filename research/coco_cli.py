@@ -47,6 +47,14 @@ def resolve_coco_path() -> str:
     """Resolve the COCO executable path from config or PATH."""
     override = os.environ.get(COCO_BIN_ENV)
     if override:
+        override_path = pathlib.Path(override)
+        if not override_path.is_file() or not os.access(override, os.X_OK):
+            raise CocoExecutionError(
+                phase="discovery",
+                message=(
+                    f"Invalid {COCO_BIN_ENV} override: {override} must exist and be executable"
+                ),
+            )
         return override
 
     path = shutil.which("coco")
@@ -94,13 +102,24 @@ def run_coco(
         worktree,
         workspace,
     )
-    completed = runner(
-        argv,
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        completed = runner(
+            argv,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise CocoExecutionError(
+            phase=phase,
+            returncode=None,
+            stdout="",
+            stderr="",
+            message=(
+                f"COCO phase {phase} failed to launch ({type(exc).__name__}): {exc}"
+            ),
+        ) from exc
 
     if completed.returncode != 0:
         tail = _tail(completed.stderr) or _tail(completed.stdout)
